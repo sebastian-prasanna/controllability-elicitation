@@ -1,0 +1,44 @@
+# Example config for scripts/tinker_train_eval.py
+#
+#   .venv/bin/python scripts/tinker_train_eval.py tinker_runs/example_config.yaml
+#
+# Trains base_model on the SFT dataset, saves sampling checkpoints, then runs
+# the CoT-Control eval on every checkpoint in parallel. All outputs land in
+# <output_dir>/<run_name>/ (config copy, losses + checkpoint paths, rendered
+# training data, per-checkpoint eval JSONs, eval_summary.json, summary.png).
+
+run_name: example_sft_compliance
+base_model: Qwen/Qwen3-8B
+output_dir: tinker_runs
+lora_rank: null            # null = tinker default
+
+train:
+  # JSONL, one {"input": [...messages], "output": [...messages]} per line.
+  # For CoT-control interventions the assistant message typically embeds the
+  # compliant reasoning as "<think>\n{reasoning}\n</think>\n\n{response}".
+  data_path: datasets/sft_example.jsonl
+  num_examples: null       # cap the dataset (null = all)
+  lr: 1e-4
+  batch_size: 128
+  num_epochs: 3
+  shuffle: true
+  save_sampling_step: 1    # save a sampling checkpoint every N epochs
+                           # (epoch 0 = pre-training is always saved)
+  save_every_n_steps: null # or save by gradient steps instead of epochs
+  save_training_step: -1   # -1 = don't save resumable training state
+
+eval:                      # CoT-Control-QA on every saved sampling checkpoint
+  eval_base_model: false   # epoch-0 checkpoint already covers "before training"
+  dataset: all             # gpqa | hle | mmlu_pro | all
+  mode: random             # a single constraint mode, or random | all
+  seed: 0                  # question->mode assignment (0 matches all prior runs)
+  max_samples: null        # cap questions (null = full 1,214 for dataset: all)
+  subsample_seed: null     # set for a seeded random question subsample
+  system_prompt: ""        # literal string, or a path to a .txt file
+  temperature: 0.0
+  max_tokens: 12000
+  num_samples: 1           # rollouts per question (e.g. 64 for BoN-style)
+  max_concurrent: 2000     # tinker-side sampling concurrency
+  cache: true              # utils' on-disk generation cache
+  judge_model: openai/gpt-5-mini   # ignore_question judge (via OpenRouter)
+  judge_concurrency: 200

@@ -1,0 +1,13 @@
+variant,source,target,n,gained,lost,net,p_sign
+prefill,gpqa,hle,469,74,5,69,0.0
+prefill,gpqa,mmlu_pro,300,55,4,51,0.0
+prefill,hle,gpqa,445,49,7,42,0.0
+prefill,hle,mmlu_pro,300,36,2,34,0.0
+prefill,mmlu_pro,gpqa,445,110,7,103,0.0
+prefill,mmlu_pro,hle,469,144,6,138,0.0
+system,gpqa,hle,469,62,6,56,0.0
+system,gpqa,mmlu_pro,300,44,7,37,0.0
+system,hle,gpqa,445,83,6,77,0.0
+system,hle,mmlu_pro,300,72,3,69,0.0
+system,mmlu_pro,gpqa,445,106,7,99,0.0
+system,mmlu_pro,hle,469,124,5,119,0.0

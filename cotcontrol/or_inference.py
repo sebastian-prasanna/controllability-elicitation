@@ -1,0 +1,172 @@
+"""Async inference through OpenRouter.
+
+Usage:
+    from or_inference import GenerateConfig, generate_async
+
+    results = await generate_async(
+        prompts=[[{"role": "user", "content": "Hello!"}], ...],
+        model="openai/gpt-4o-mini",
+        config=GenerateConfig(temperature=0.7, num_samples=4),
+    )
+    # results[i] = {"input": <messages>, "output": [<num_samples completions>],
+    #               "model": ..., "metadata": [<per-sample usage/finish_reason/error/raw>]}
+"""
+
+import asyncio
+import json
+import os
+import random
+from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+from openai import AsyncOpenAI
+from tqdm.asyncio import tqdm_asyncio
+
+load_dotenv()
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+@dataclass
+class GenerateConfig:
+    temperature: float = 1.0
+    max_tokens: int = 4096
+    top_p: float = 1.0
+    num_samples: int = 1
+    max_concurrency: int = 100
+    max_retries: int = 5
+
+
+def get_client() -> AsyncOpenAI:
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY not set (expected in .env)")
+    return AsyncOpenAI(base_url=OPENROUTER_BASE_URL, api_key=api_key)
+
+
+async def _sample_once(
+    client: AsyncOpenAI,
+    semaphore: asyncio.Semaphore,
+    model: str,
+    messages: list[dict],
+    config: GenerateConfig,
+) -> dict:
+    """One rollout. Returns a dict with the completion plus full raw response."""
+    async with semaphore:
+        for attempt in range(config.max_retries):
+            try:
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=config.temperature,
+                    max_tokens=config.max_tokens,
+                    top_p=config.top_p,
+                )
+                choice = response.choices[0]
+                # OpenRouter puts reasoning-model traces on message.reasoning
+                # (an extra field the openai SDK keeps but doesn't type).
+                message = choice.message.model_dump()
+                return {
+                    "completion": message.get("content"),
+                    "reasoning": message.get("reasoning")
+                    or message.get("reasoning_content"),
+                    "finish_reason": choice.finish_reason,
+                    "usage": response.usage.model_dump() if response.usage else None,
+                    "raw_response": response.model_dump(),
+                    "error": None,
+                }
+            except Exception as e:
+                if attempt == config.max_retries - 1:
+                    return {
+                        "completion": None,
+                        "reasoning": None,
+                        "finish_reason": None,
+                        "usage": None,
+                        "raw_response": None,
+                        "error": f"{type(e).__name__}: {e}",
+                    }
+                # Exponential backoff with jitter for rate limits / transient errors.
+                await asyncio.sleep(2**attempt + random.random())
+
+
+async def generate_async(
+    prompts: list[list[dict]],
+    model: str,
+    config: GenerateConfig | None = None,
+    save_path: str | Path | None = None,
+    progress: bool = True,
+) -> list[dict]:
+    """Generate completions for a list of message lists via OpenRouter.
+
+    All prompt x sample rollouts run concurrently, bounded by a semaphore of
+    size config.max_concurrency.
+
+    Returns one dict per prompt:
+        {
+            "input": <the original messages list>,
+            "model": <model id>,
+            "output": [<completion str>, ...],   # length num_samples
+            "reasoning": [<reasoning str or None>, ...],  # length num_samples
+            "metadata": [{"finish_reason", "usage", "error", "raw_response"}, ...],
+        }
+    If save_path is given, also appends each dict as a JSONL line for later
+    analysis.
+    """
+    config = config or GenerateConfig()
+    client = get_client()
+    semaphore = asyncio.Semaphore(config.max_concurrency)
+
+    tasks = [
+        _sample_once(client, semaphore, model, messages, config)
+        for messages in prompts
+        for _ in range(config.num_samples)
+    ]
+    gather = tqdm_asyncio.gather if progress else asyncio.gather
+    flat = await gather(*tasks)
+
+    results = []
+    for i, messages in enumerate(prompts):
+        samples = flat[i * config.num_samples : (i + 1) * config.num_samples]
+        results.append(
+            {
+                "input": messages,
+                "model": model,
+                "output": [s["completion"] for s in samples],
+                "reasoning": [s["reasoning"] for s in samples],
+                "metadata": [
+                    {k: s[k] for k in ("finish_reason", "usage", "error", "raw_response")}
+                    for s in samples
+                ],
+            }
+        )
+
+    if save_path is not None:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(save_path, "a") as f:
+            for prompt_idx, record in enumerate(results):
+                f.write(json.dumps({"prompt_idx": prompt_idx, **record}) + "\n")
+
+    return results
+
+
+if __name__ == "__main__":
+    test_prompts = [
+        [{"role": "user", "content": "Say 'hello' and nothing else."}],
+        [{"role": "user", "content": "What is 17 * 23? Answer with just the number."}],
+    ]
+    results = asyncio.run(
+        generate_async(
+            test_prompts,
+            model="qwen/qwen3.6-35b-a3b",
+            config=GenerateConfig(temperature=0.0, max_tokens=2048, num_samples=2),
+        )
+    )
+    for i, r in enumerate(results):
+        print(f"[prompt {i}] input: {r['input'][0]['content']!r}")
+        for j in range(len(r["output"])):
+            reasoning = r["reasoning"][j]
+            preview = reasoning[:200] + "..." if reasoning and len(reasoning) > 200 else reasoning
+            print(f"  sample {j} reasoning: {preview!r}")
+            print(f"  sample {j} output: {r['output'][j]!r} (error={r['metadata'][j]['error']})")

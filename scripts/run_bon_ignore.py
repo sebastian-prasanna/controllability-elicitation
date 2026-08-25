@@ -17,8 +17,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from cotcontrol.cotcontrol_eval import eval_cotcontrolqa  # noqa: E402
-from cotcontrol.or_inference import GenerateConfig  # noqa: E402
+from cotcontrol.eval.eval import eval_cotcontrolqa  # noqa: E402
+from cotcontrol.inference.openrouter import GenerateConfig  # noqa: E402
 
 MODEL = "openai/gpt-oss-120b"
 

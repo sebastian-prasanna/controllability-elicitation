@@ -60,7 +60,9 @@ train_image = (
     )
     .uv_pip_install(
         "torch>=2.8",
-        "transformers>=5.5",
+        # Pinned to the locally-tested minor: transformers 6 renamed/dropped
+        # several TrainingArguments fields (warmup_ratio et al.).
+        "transformers>=5.5,<5.16",
         "peft>=0.18.1",
         "accelerate>=1.13",
         "datasets",
@@ -234,9 +236,8 @@ def load_sft_jsonl(
                     rows.append(json.loads(line))
     if num_examples is not None:
         rows = rows[:num_examples]
-    for i, r in enumerate(rows[:1] or [{}]):
-        if "input" not in r or "output" not in r:
-            raise ValueError(f"row {i} missing 'input'/'output': keys={list(r)}")
+    if rows and ("input" not in rows[0] or "output" not in rows[0]):
+        raise ValueError(f"rows must have 'input'/'output': got keys={list(rows[0])}")
     return rows
 
 

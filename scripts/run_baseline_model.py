@@ -21,9 +21,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)  # relative results/ and datasets/ paths resolve from repo root
 
-from cotcontrol import or_inference
-from cotcontrol.cotcontrol_eval import eval_cotcontrolqa
-from cotcontrol.or_inference import GenerateConfig
+from cotcontrol.eval.eval import eval_cotcontrolqa
+from cotcontrol.inference.openrouter import GenerateConfig
 
 MODEL = sys.argv[1]
 SMOKE = "--smoke" in sys.argv
@@ -31,36 +30,37 @@ MAX_TOKENS = int(sys.argv[sys.argv.index("--max-tokens") + 1]) if "--max-tokens"
 SLUG = MODEL.replace("/", "_") + (f"_mt{MAX_TOKENS}" if MAX_TOKENS != 30000 else "")
 PROGRESS_PATH = Path(f"results/baseline_progress_{SLUG}.jsonl")
 
-_orig_sample_once = or_inference._sample_once
-_write_lock = asyncio.Lock()
+_run_t0 = time.time()
 
 
-async def _logged_sample_once(client, semaphore, model, messages, config):
-    t0 = time.time()
-    r = await _orig_sample_once(client, semaphore, model, messages, config)
+def _log_result(r):
+    """Per-rollout progress line via generate_async's on_result callback.
+
+    Same fields as the old _sample_once monkeypatch wrapper, except `secs` is
+    now seconds since run start (per-rollout latency isn't observable here);
+    prompt_idx/sample_idx are new extras. Called synchronously on the event
+    loop, so plain appends are safe."""
     usage = r["usage"] or {}
     line = {
         "t": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "secs": round(time.time() - t0, 1),
-        "model": model,
+        "secs": round(time.time() - _run_t0, 1),
+        "model": MODEL,
         "finish_reason": r["finish_reason"],
         "error": r["error"],
         "completion_tokens": usage.get("completion_tokens"),
         "prompt_tokens": usage.get("prompt_tokens"),
         "extracted": "ANSWER:" in (r["completion"] or ""),
+        "prompt_idx": r["prompt_idx"],
+        "sample_idx": r["sample_idx"],
     }
-    async with _write_lock:
-        with open(PROGRESS_PATH, "a") as f:
-            f.write(json.dumps(line) + "\n")
-    return r
-
-
-or_inference._sample_once = _logged_sample_once
+    with open(PROGRESS_PATH, "a") as f:
+        f.write(json.dumps(line) + "\n")
 
 
 async def main():
     r = await eval_cotcontrolqa(
         model=MODEL,
+        on_result=_log_result,
         generate_config=GenerateConfig(
             temperature=0.0,
             max_tokens=MAX_TOKENS,

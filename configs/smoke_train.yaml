@@ -1,0 +1,33 @@
+# End-to-end integration smoke test: tiny model, tiny data, masking on.
+# ~10 min and ~$1 on an L40S. Run after infra changes:
+#   .venv/bin/python scripts/train_eval.py configs/smoke_train.yaml
+
+run_name: smoke-qwen06b
+base_model: Qwen/Qwen3-0.6B
+gpu: L40S
+
+train:
+  data_path: datasets/sft_example.jsonl
+  lr: 1e-4
+  batch_size: 8
+  num_epochs: 3
+  max_seq_length: 8192
+  save_sampling_step: 1
+
+lora:
+  lora_rank: 32
+  lora_alpha: 32
+  lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+elicitation:
+  train_params: 1000
+  mask_seed: 0
+
+eval:
+  eval_base_model: false     # step-0 checkpoint covers the pre-training baseline
+  dataset: gpqa
+  mode: random
+  max_samples: 6
+  max_tokens: 2000
+  max_model_len: 8192
+  parallel_checkpoints: 2

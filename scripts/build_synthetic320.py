@@ -31,35 +31,31 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(ROOT / ".env")
 
-from cotcontrol.cotcontrol_eval import assign_tasks, convert_answer_to_letter, load_dataset  # noqa: E402
-from cotcontrol.cotcontrol_grading import _split_sentences, grade_compliance  # noqa: E402
-from cotcontrol.cotcontrol_prompts import create_user_prompt  # noqa: E402
+from cotcontrol.eval.data import assign_tasks, load_dataset  # noqa: E402
+from cotcontrol.eval.grading import _split_sentences, convert_answer_to_letter, grade_compliance  # noqa: E402
+from cotcontrol.eval.prompts import create_user_prompt  # noqa: E402
+from cotcontrol.training.rendering import render_example  # noqa: E402
 
 MODEL = "openai/gpt-oss-120b"
 TARGET = 320
 MIN_CHARS = 300
-MAX_SEQ_TOKENS = 30000  # tinker max seq is 32,768; keep headroom
+MAX_SEQ_TOKENS = 30000  # historical tinker max seq was 32,768; kept so the dataset is unchanged
 
-_renderer = None
+_tokenizer = None
 
 
 def n_render_tokens(row) -> int:
     """Token length of the fully-rendered supervised example (input + output),
-    using the same tinker-cookbook renderer that utils.sft_train uses."""
-    global _renderer
-    if _renderer is None:
+    using the same chat-template rendering that cotcontrol.training trains on
+    (replaces the old tinker-cookbook renderer; counts may differ by a few
+    special tokens, which the MAX_SEQ_TOKENS headroom absorbs)."""
+    global _tokenizer
+    if _tokenizer is None:
         from transformers import AutoTokenizer
 
-        import utils
-
-        _renderer = utils.get_renderer(AutoTokenizer.from_pretrained(MODEL))
-    import tinker
-
-    model_input, _ = _renderer.build_supervised_example(row["input"] + row["output"])
-    return sum(
-        len(c.tokens) if isinstance(c, tinker.types.EncodedTextChunk) else c.length
-        for c in model_input.chunks
-    )
+        _tokenizer = AutoTokenizer.from_pretrained(MODEL)
+    ex = render_example(_tokenizer, row["input"], row["output"], max_seq_length=10**9)
+    return len(ex["input_ids"])
 POOL_JSON = ROOT / "results/synthetic320/unconstrained_pool.json"
 OLD_BON_JSON = ROOT / "results/cotcontrolqa/2026-08-13T21-37-46_openai_gpt-oss-120b_all_random.json"
 NEW_IGNORE_GLOB = str(ROOT / "results/synthetic320/*ignore_question.json")

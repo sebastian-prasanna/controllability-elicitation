@@ -32,9 +32,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)  # relative results/ and datasets/ paths resolve from repo root
 
-from cotcontrol import or_inference
-from cotcontrol.cotcontrol_eval import eval_cotcontrolqa
-from cotcontrol.or_inference import GenerateConfig
+from cotcontrol.eval.eval import eval_cotcontrolqa
+from cotcontrol.inference.openrouter import GenerateConfig
 
 
 def parse_args():
@@ -72,33 +71,33 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     progress_path = run_dir / "progress.jsonl"
 
-    # per-rollout progress log via monkeypatched _sample_once (same pattern as run_bon_cotcontrol)
-    orig_sample_once = or_inference._sample_once
-    write_lock = asyncio.Lock()
+    # per-rollout progress log via generate_async's on_result callback.
+    # Same fields as the old _sample_once monkeypatch, except `secs` is now
+    # seconds since run start (per-rollout latency isn't observable here);
+    # prompt_idx/sample_idx are new extras. Called synchronously on the event
+    # loop, so plain appends are safe.
+    run_t0 = time.time()
 
-    async def logged_sample_once(client, semaphore, model, messages, config):
-        t0 = time.time()
-        r = await orig_sample_once(client, semaphore, model, messages, config)
+    def log_result(r):
         usage = r["usage"] or {}
         line = {
             "t": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "secs": round(time.time() - t0, 1),
-            "model": model,
+            "secs": round(time.time() - run_t0, 1),
+            "model": args.model,
             "finish_reason": r["finish_reason"],
             "error": r["error"],
             "completion_tokens": usage.get("completion_tokens"),
             "prompt_tokens": usage.get("prompt_tokens"),
             "extracted": "ANSWER:" in (r["completion"] or ""),
+            "prompt_idx": r["prompt_idx"],
+            "sample_idx": r["sample_idx"],
         }
-        async with write_lock:
-            with open(progress_path, "a") as f:
-                f.write(json.dumps(line) + "\n")
-        return r
-
-    or_inference._sample_once = logged_sample_once
+        with open(progress_path, "a") as f:
+            f.write(json.dumps(line) + "\n")
 
     result = asyncio.run(eval_cotcontrolqa(
         model=args.model,
+        on_result=log_result,
         system_prompt=system_prompt,
         generate_config=GenerateConfig(
             temperature=args.temperature,

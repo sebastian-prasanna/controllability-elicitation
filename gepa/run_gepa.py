@@ -27,6 +27,12 @@ def main():
     p.add_argument("--minibatch", type=int, default=16)
     p.add_argument("--pareto-size", type=int, default=48)
     p.add_argument("--max-tokens", type=int, default=16000)
+    p.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=200,
+        help="cap on simultaneous OpenRouter requests (lower when sweeping many runs at once)",
+    )
     p.add_argument("--task-model", default="qwen/qwen3.6-35b-a3b")
     p.add_argument("--reflection-model", default="anthropic/claude-sonnet-5")
     p.add_argument("--judge-model", default="openai/gpt-5-mini")
@@ -54,6 +60,7 @@ def main():
         minibatch_size=args.minibatch,
         pareto_size=args.pareto_size,
         max_tokens=args.max_tokens,
+        max_concurrency=args.max_concurrency,
         task_model=args.task_model,
         reflection_model=args.reflection_model,
         judge_model=args.judge_model,

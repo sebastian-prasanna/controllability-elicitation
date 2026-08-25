@@ -57,7 +57,10 @@ def build_global_mask(
     Deterministic given (named_numels contents, k, seed): entries are sorted by
     name so caller iteration order doesn't matter, and sampling uses a local
     torch.Generator. Rejection-samples uniqueness (fine for k << N; raises if
-    k > N). Params that receive no indices are omitted from the result.
+    k > N). EVERY param appears in the result — with an empty index tensor if
+    it drew no indices — so apply_gradient_masks can freeze it; omitting it
+    would leave the param hookless and training freely (caught by verify_mask
+    in the first GPU smoke run).
     """
     named_numels = sorted(named_numels)
     total = sum(n for _, n in named_numels)
@@ -88,8 +91,7 @@ def build_global_mask(
         while i < len(sorted_idx) and sorted_idx[i] < hi:
             local.append(sorted_idx[i] - offset)
             i += 1
-        if local:
-            result[name] = torch.tensor(local, dtype=torch.long)
+        result[name] = torch.tensor(local, dtype=torch.long)
         offset = hi
     return result
 
@@ -105,11 +107,21 @@ def apply_gradient_masks(
     on dead tensors. For a DTensor param the full boolean mask is built at the
     global shape and distributed with the param's own mesh/placements, so each
     rank masks its shard consistently. Returns the mask-tensor dict for reuse.
+
+    Masking acts on GRADIENTS only: optimizer updates that bypass the gradient
+    — AdamW weight decay in particular, which decays every param holding a
+    .grad tensor even if it's all zeros — would still move masked-out weights.
+    Callers must train with weight_decay=0 (the worker enforces this).
     """
     params = {_normalize_name(n): p for n, p in model.named_parameters()}
     mask_tensors: Dict[str, torch.Tensor] = {}
     for name, idx in masks.items():
         param = params[name]  # KeyError here = mask built on a different model
+        if idx.numel() == 0:
+            # No selected entries: freeze outright. AdamW skips grad-None
+            # params entirely, so neither updates nor weight decay touch it.
+            param.requires_grad_(False)
+            continue
         flat = torch.zeros(param.numel(), dtype=torch.bool)
         flat[idx] = True
         full_mask = flat.view(param.shape)

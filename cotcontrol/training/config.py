@@ -60,7 +60,8 @@ class TrainConfig:
     # --- optimization ---
     lr: float = 1e-4
     adam_epsilon: float = 1e-8       # HF default; configurable for sweeps
-    weight_decay: float = 0.0
+    weight_decay: float = 0.0       # must stay 0.0 when train_params is set
+                                    # (decay moves masked-out weights off init)
     max_grad_norm: float = 1.0       # HF default clipping; 0 disables
     lr_scheduler_type: str = "constant"
     warmup_ratio: float = 0.0

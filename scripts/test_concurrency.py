@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)  # relative results/ and datasets/ paths resolve from repo root
 
-from cotcontrol.or_inference import GenerateConfig, generate_async
+from cotcontrol.inference.openrouter import GenerateConfig, generate_async
 
 MODEL = "qwen/qwen3.6-35b-a3b"
 LEVELS = [50, 100, 200, 400, 800]

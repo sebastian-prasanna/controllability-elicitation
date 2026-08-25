@@ -1,0 +1,64 @@
+# Example Modal LoRA training config.
+#
+# Every key here is a field of cotcontrol.training.config.TrainConfig; the
+# top-level sections (train/lora/elicitation) are purely for readability.
+# Load pattern:
+#
+#   import yaml
+#   from cotcontrol.training.config import TrainConfig, filter_dataclass_kwargs
+#   from cotcontrol.training.modal_app import load_sft_jsonl, train
+#
+#   raw = yaml.safe_load(open("configs/example_train.yaml"))
+#   flat = {k: v for section in raw.values() if isinstance(section, dict)
+#           for k, v in section.items()} | {
+#          k: v for k, v in raw.items() if not isinstance(v, dict)}
+#   cfg = TrainConfig(**filter_dataclass_kwargs(TrainConfig, flat))
+#   result = train(cfg, load_sft_jsonl(cfg.data_path))
+#
+# (filter_dataclass_kwargs drops unknown keys, so extra sections — eval
+# settings, notes — are safe to keep in the same file.)
+
+run_name: example-qwen3-8b        # checkpoints land at /checkpoints/<run_name>-<timestamp>/
+base_model: Qwen/Qwen3-8B
+gpu: H200                         # Modal GPU spec; "H200:4" enables FSDP2 sharding
+
+train:
+  data_path: datasets/sft_example.jsonl   # str or list of jsonl paths
+  # num_examples: 256             # optional cap (applied after seeded shuffle)
+  shuffle: true                   # seeded pre-shuffle + per-epoch shuffling
+  lr: 1e-4
+  lr_scheduler_type: constant     # any HF scheduler name
+  warmup_ratio: 0.0
+  weight_decay: 0.0
+  max_grad_norm: 1.0              # 0 disables clipping
+  adam_epsilon: 1e-8
+  batch_size: 32                  # EFFECTIVE batch (examples per optimizer step);
+                                  # grad accum derived from per_device_batch_size * n_gpus
+  per_device_batch_size: 1
+  num_epochs: 3
+  max_steps: -1                   # -1 = run num_epochs; >0 caps optimizer steps
+  max_seq_length: 16384
+  seed: 42
+  # Checkpoint cadence (pick one):
+  save_sampling_step: 1           # save every N epochs (default)
+  # save_every_n_steps: 20        # ... or every N optimizer steps
+  # save_at_steps: [10, 40, 160]  # ... or exactly these steps
+  # chat_template_kwargs:         # extra prompt-render kwargs, e.g. for gpt-oss:
+  #   reasoning_effort: high
+
+lora:
+  lora_rank: 32
+  lora_alpha: 32
+  lora_dropout: 0.0
+  # Attention-only: the elicitation paper's most parameter-efficient placement.
+  # For all-linear incl. fused MoE experts see config.default_lora_targets().
+  lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+  lora_target_parameters: []      # e.g. [mlp.experts.gate_up_proj, mlp.experts.down_proj]
+
+elicitation:
+  # k = number of individual LoRA scalar weights allowed to train, sampled
+  # uniformly at random across ALL adapter weights jointly. Everything else is
+  # gradient-masked and verified unchanged after training (mask_verification.json).
+  # Omit / null = plain LoRA SFT with no masking.
+  train_params: 1000
+  mask_seed: 0

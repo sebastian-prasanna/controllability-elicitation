@@ -19,9 +19,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from cotcontrol.cotcontrol_eval import load_dataset  # noqa: E402
-from cotcontrol.cotcontrol_prompts import create_user_prompt  # noqa: E402
-from cotcontrol.or_inference import GenerateConfig, generate_async  # noqa: E402
+from cotcontrol.eval.data import load_dataset  # noqa: E402
+from cotcontrol.eval.prompts import create_user_prompt  # noqa: E402
+from cotcontrol.inference.openrouter import GenerateConfig, generate_async  # noqa: E402
 
 MODEL = "openai/gpt-oss-120b"
 N_SAMPLES = 8

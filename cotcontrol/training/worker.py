@@ -258,6 +258,15 @@ def main():
     trainable = [(n, p.numel()) for n, p in model.named_parameters() if p.requires_grad]
     total_lora_params = sum(n for _, n in trainable)
     if cfg.train_params is not None:
+        # Weight decay is applied by AdamW to every param that has a .grad
+        # tensor — even an all-zero one — so any nonzero decay silently moves
+        # the frozen (masked-out) weights off their init and breaks the
+        # elicitation invariant. The paper trains without decay; fail early.
+        if cfg.weight_decay != 0.0:
+            raise ValueError(
+                f"train_params masking requires weight_decay=0.0 "
+                f"(got {cfg.weight_decay}): decay updates masked-out weights."
+            )
         masks = build_global_mask(trainable, cfg.train_params, cfg.mask_seed)
         initial_snapshot = snapshot_params(model)
         if is_main:
@@ -271,8 +280,10 @@ def main():
             if cfg.train_params <= 1_000_000:
                 mask_record["indices"] = {n: v.tolist() for n, v in masks.items()}
             (Path(output_dir) / "mask.json").write_text(json.dumps(mask_record))
+            n_hit = sum(1 for v in masks.values() if v.numel())
             print(f"[mask] k={cfg.train_params}/{total_lora_params} "
-                  f"across {len(masks)}/{len(trainable)} adapter tensors")
+                  f"across {n_hit}/{len(trainable)} adapter tensors "
+                  f"({len(trainable) - n_hit} frozen outright)")
     elif is_main:
         print(f"[mask] disabled — training all {total_lora_params} LoRA params")
 
@@ -320,6 +331,9 @@ def main():
 
     grad_accum = derive_grad_accum(cfg, args.num_gpus)
     steps_per_epoch = max(1, math.ceil(len(records) / cfg.batch_size))
+    # transformers 5 dropped warmup_ratio; convert to steps ourselves.
+    total_steps = cfg.max_steps if cfg.max_steps > 0 else steps_per_epoch * cfg.num_epochs
+    warmup_steps = round(cfg.warmup_ratio * total_steps)
 
     train_args = TrainingArguments(
         output_dir=output_dir,
@@ -329,7 +343,7 @@ def main():
         max_steps=cfg.max_steps,        # -1 = use epochs; >0 caps optimizer steps
         learning_rate=cfg.lr,
         lr_scheduler_type=cfg.lr_scheduler_type,
-        warmup_ratio=cfg.warmup_ratio,
+        warmup_steps=warmup_steps,
         weight_decay=cfg.weight_decay,
         optim="adamw_torch",
         adam_epsilon=cfg.adam_epsilon,  # betas stay at HF defaults (0.9, 0.999)

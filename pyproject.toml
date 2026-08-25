@@ -1,0 +1,28 @@
+[project]
+name = "controllability-elicitation"
+version = "0.1.0"
+description = "Eliciting CoT controllability: CoT-Control-QA eval + prompting/few-shot/BoN/GEPA/SFT elicitation"
+requires-python = ">=3.11"
+# The shared venv (/root/.venv) is pre-provisioned; this list documents what
+# the local (non-container) code actually imports. GPU deps (vllm, kernels)
+# live only in the Modal images.
+dependencies = [
+    "modal>=1.5",
+    "openai>=2.0",
+    "python-dotenv",
+    "pandas",
+    "pyyaml",
+    "tqdm",
+    "torch",          # masking utilities + local tests
+    "transformers",   # rendering + local tests
+    "peft>=0.18",
+    "accelerate",
+    "matplotlib",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["cotcontrol*", "gepa*", "fewshot*"]

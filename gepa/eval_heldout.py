@@ -14,9 +14,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from cotcontrol.cotcontrol_eval import eval_cotcontrolqa  # noqa: E402
+from cotcontrol.eval.eval import eval_cotcontrolqa  # noqa: E402
 from gepa import shaped_compliance, task_score  # noqa: E402  (gepa/gepa.py, via script dir)
-from cotcontrol.or_inference import GenerateConfig  # noqa: E402
+from cotcontrol.inference.openrouter import GenerateConfig  # noqa: E402
 
 HELDOUT_SUBSAMPLE_SEED = 9000  # fixed fold, distinct from train folds
 

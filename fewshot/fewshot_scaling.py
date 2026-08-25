@@ -28,9 +28,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)  # relative results/ and datasets/ paths resolve from repo root
 
-from cotcontrol.cotcontrol_eval import CONSTRAINT_MODES, eval_cotcontrolqa
-from cotcontrol.cotcontrol_grading import _split_sentences, grade_compliance
-from cotcontrol.or_inference import GenerateConfig
+from cotcontrol.eval.data import CONSTRAINT_MODES
+from cotcontrol.eval.eval import eval_cotcontrolqa
+from cotcontrol.eval.grading import _split_sentences, grade_compliance
+from cotcontrol.inference.openrouter import GenerateConfig
 
 MODEL = "openai/gpt-oss-120b"
 BON_JSON = "results/cotcontrolqa/2026-08-13T21-37-46_openai_gpt-oss-120b_all_random.json"

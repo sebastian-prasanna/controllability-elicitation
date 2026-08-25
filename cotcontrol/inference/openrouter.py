@@ -1,7 +1,7 @@
 """Async inference through OpenRouter.
 
 Usage:
-    from or_inference import GenerateConfig, generate_async
+    from cotcontrol.inference.openrouter import GenerateConfig, generate_async
 
     results = await generate_async(
         prompts=[[{"role": "user", "content": "Hello!"}], ...],
@@ -10,6 +10,10 @@ Usage:
     )
     # results[i] = {"input": <messages>, "output": [<num_samples completions>],
     #               "model": ..., "metadata": [<per-sample usage/finish_reason/error/raw>]}
+
+Returns the canonical schema documented in cotcontrol.inference.types. For
+per-rollout progress logging (e.g. appending a JSONL line as each sample
+finishes), pass `on_result` — don't monkeypatch `_sample_once`.
 """
 
 import asyncio
@@ -96,6 +100,7 @@ async def generate_async(
     config: GenerateConfig | None = None,
     save_path: str | Path | None = None,
     progress: bool = True,
+    on_result=None,
 ) -> list[dict]:
     """Generate completions for a list of message lists via OpenRouter.
 
@@ -112,15 +117,28 @@ async def generate_async(
         }
     If save_path is given, also appends each dict as a JSONL line for later
     analysis.
+
+    on_result, if given, is called synchronously as each rollout finishes with
+    {"prompt_idx", "sample_idx", "messages", "completion", "reasoning",
+     "finish_reason", "usage", "error", "raw_response"} — use it for
+    incremental progress logs on long runs.
     """
     config = config or GenerateConfig()
     client = get_client()
     semaphore = asyncio.Semaphore(config.max_concurrency)
 
+    async def _run(prompt_idx: int, sample_idx: int, messages: list[dict]) -> dict:
+        result = await _sample_once(client, semaphore, model, messages, config)
+        if on_result is not None:
+            on_result(
+                {"prompt_idx": prompt_idx, "sample_idx": sample_idx, "messages": messages, **result}
+            )
+        return result
+
     tasks = [
-        _sample_once(client, semaphore, model, messages, config)
-        for messages in prompts
-        for _ in range(config.num_samples)
+        _run(i, j, messages)
+        for i, messages in enumerate(prompts)
+        for j in range(config.num_samples)
     ]
     gather = tqdm_asyncio.gather if progress else asyncio.gather
     flat = await gather(*tasks)

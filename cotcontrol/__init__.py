@@ -1,4 +1,7 @@
-"""CoT-Control-QA eval package: OpenRouter inference, prompts, grading, eval loop."""
+"""CoT-Control elicitation library.
 
-from cotcontrol.cotcontrol_eval import CONSTRAINT_MODES, eval_cotcontrolqa  # noqa: F401
-from cotcontrol.or_inference import GenerateConfig, generate_async, get_client  # noqa: F401
+Subpackages:
+    cotcontrol.eval       CoT-Control-QA eval (data, prompts, grading, judges, eval loop)
+    cotcontrol.inference  generation backends: openrouter (API), modal_vllm (GPU)
+    cotcontrol.training   Modal LoRA training with random-subset parameter masking
+"""

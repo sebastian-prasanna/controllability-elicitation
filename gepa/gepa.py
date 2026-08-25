@@ -33,8 +33,8 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from cotcontrol.cotcontrol_eval import eval_cotcontrolqa  # noqa: E402
-from cotcontrol.cotcontrol_grading import (  # noqa: E402
+from cotcontrol.eval.eval import eval_cotcontrolqa  # noqa: E402
+from cotcontrol.eval.grading import (  # noqa: E402
     _count_word_occurrences,
     _get_line_ending_indices,
     _is_list_marker,
@@ -43,7 +43,7 @@ from cotcontrol.cotcontrol_grading import (  # noqa: E402
     _normalize_word,
     _split_sentences,
 )
-from cotcontrol.or_inference import GenerateConfig, generate_async  # noqa: E402
+from cotcontrol.inference.openrouter import GenerateConfig, generate_async  # noqa: E402
 
 
 @dataclass

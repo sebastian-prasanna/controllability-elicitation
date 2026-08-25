@@ -58,7 +58,7 @@ def build_model_and_tokenizer(cfg: TrainConfig):
     model_config = AutoConfig.from_pretrained(cfg.base_model, trust_remote_code=True)
     kwargs = dict(
         torch_dtype=torch.bfloat16,
-        attn_implementation="sdpa",
+        attn_implementation=cfg.attn_implementation or "sdpa",
         trust_remote_code=True,
     )
     if _is_gpt_oss(cfg, model_config):
@@ -67,6 +67,11 @@ def build_model_and_tokenizer(cfg: TrainConfig):
         from transformers import Mxfp4Config
 
         kwargs["quantization_config"] = Mxfp4Config(dequantize=True)
+        if cfg.attn_implementation is None:
+            # gpt-oss has no SDPA support in transformers (attention sinks);
+            # eager materializes [heads, L, L] so it's fine for short SFT rows
+            # but set attn_implementation explicitly for long-context training.
+            kwargs["attn_implementation"] = "eager"
     model = AutoModelForCausalLM.from_pretrained(cfg.base_model, **kwargs)
     tokenizer = AutoTokenizer.from_pretrained(cfg.base_model, trust_remote_code=True)
     if tokenizer.pad_token_id is None:

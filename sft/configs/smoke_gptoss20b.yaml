@@ -1,0 +1,33 @@
+# gpt-oss-20b integration smoke: MXFP4 dequant load, harmony rendering on real
+# BoN data, masked training, vLLM LoRA serving. ~30 min / a few $ on H200.
+#   .venv/bin/python scripts/train_eval.py sft/configs/smoke_gptoss20b.yaml
+
+run_name: smoke-gptoss20b
+base_model: openai/gpt-oss-20b
+gpu: H200
+
+train:
+  data_path: training_data/bon_compliant_gptoss.jsonl
+  num_examples: 32
+  lr: 1e-2                  # sparse-mask regime (see lr notes in example_train.yaml)
+  batch_size: 8
+  num_epochs: 2
+  max_seq_length: 16384
+  save_sampling_step: 1
+
+lora:
+  lora_rank: 32
+  lora_alpha: 32
+  lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+elicitation:
+  train_params: 1000
+  mask_seed: 0
+
+eval:
+  dataset: gpqa
+  mode: random
+  max_samples: 6
+  max_tokens: 4000
+  max_model_len: 16384
+  parallel_checkpoints: 2

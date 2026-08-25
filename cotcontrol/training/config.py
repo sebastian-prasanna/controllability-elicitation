@@ -108,6 +108,9 @@ class TrainConfig:
     # Extra chat-template kwargs for prompt rendering, e.g.
     # {"reasoning_effort": "high"} for gpt-oss.
     chat_template_kwargs: Optional[dict] = None
+    # HF attention backend. None = auto: "sdpa", except gpt-oss -> "eager"
+    # (no SDPA support; eager is O(L^2) memory so revisit for long contexts).
+    attn_implementation: Optional[str] = None
 
     def __post_init__(self) -> None:
         # YAML 1.1 parses unquoted "1e-4" as a string (no decimal point), so

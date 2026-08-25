@@ -30,10 +30,10 @@ cotcontrol/                 the library
     modal_app.py            the Modal train app + local train() entrypoint
 gepa/                       GEPA (reflective prompt evolution) on the eval; runs/ = run logs
 fewshot/                    few-shot scaling experiments
-sft/runs/                   train_eval.py run outputs (config, losses, per-checkpoint evals)
+sft/                        SFT pipeline home: configs/ (train YAMLs) + runs/ (train_eval.py
+                            outputs: config, losses, per-checkpoint evals)
 scripts/                    thin launchers (baselines, BoN, prompt evals, dataset builders,
                             train_eval.py = config-driven train -> eval-every-checkpoint)
-configs/                    YAML run configs
 datasets/                   eval CSVs (with suppression keywords) + SFT examples
 training_data/              SFT datasets mined from BoN runs + synthetic320
 prompts/                    baseline + GEPA-evolved system prompts
@@ -83,7 +83,7 @@ so notebooks and downstream analysis don't care where generation happened.
 ## Training (Modal LoRA, optional random-subset masking)
 
 ```bash
-.venv/bin/python scripts/train_eval.py configs/example_train.yaml
+.venv/bin/python scripts/train_eval.py sft/configs/example_train.yaml
 ```
 
 Trains LoRA on the given SFT jsonl (`{"input": [...messages], "output": [...messages]}`

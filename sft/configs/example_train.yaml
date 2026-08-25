@@ -8,7 +8,7 @@
 #   from cotcontrol.training.config import TrainConfig, filter_dataclass_kwargs
 #   from cotcontrol.training.modal_app import load_sft_jsonl, train
 #
-#   raw = yaml.safe_load(open("configs/example_train.yaml"))
+#   raw = yaml.safe_load(open("sft/configs/example_train.yaml"))
 #   flat = {k: v for section in raw.values() if isinstance(section, dict)
 #           for k, v in section.items()} | {
 #          k: v for k, v in raw.items() if not isinstance(v, dict)}

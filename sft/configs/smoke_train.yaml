@@ -1,6 +1,6 @@
 # End-to-end integration smoke test: tiny model, tiny data, masking on.
 # ~10 min and ~$1 on an L40S. Run after infra changes:
-#   .venv/bin/python scripts/train_eval.py configs/smoke_train.yaml
+#   .venv/bin/python scripts/train_eval.py sft/configs/smoke_train.yaml
 
 run_name: smoke-qwen06b
 base_model: Qwen/Qwen3-0.6B

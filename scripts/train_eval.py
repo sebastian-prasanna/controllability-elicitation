@@ -1,10 +1,10 @@
 """Config-driven Modal training + CoT-Control eval pipeline.
 
-    .venv/bin/python scripts/train_eval.py configs/example_train.yaml
-    .venv/bin/python scripts/train_eval.py configs/example_train.yaml --dry-run
+    .venv/bin/python scripts/train_eval.py sft/configs/example_train.yaml
+    .venv/bin/python scripts/train_eval.py sft/configs/example_train.yaml --dry-run
     .venv/bin/python scripts/train_eval.py --eval-only sft/runs/<run_name>
 
-Reads a YAML config (see configs/example_train.yaml + the eval: section below),
+Reads a YAML config (see sft/configs/example_train.yaml + the eval: section below),
 LoRA-trains the base model on Modal (optionally masking to k random adapter
 weights), then runs the CoT-Control eval on every saved checkpoint through the
 Modal vLLM engine. Local artifacts land in sft/runs/<run_name>/:

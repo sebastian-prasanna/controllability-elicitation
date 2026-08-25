@@ -2,12 +2,12 @@
 
     .venv/bin/python scripts/train_eval.py configs/example_train.yaml
     .venv/bin/python scripts/train_eval.py configs/example_train.yaml --dry-run
-    .venv/bin/python scripts/train_eval.py --eval-only runs/train_eval/<run_name>
+    .venv/bin/python scripts/train_eval.py --eval-only sft/runs/<run_name>
 
 Reads a YAML config (see configs/example_train.yaml + the eval: section below),
 LoRA-trains the base model on Modal (optionally masking to k random adapter
 weights), then runs the CoT-Control eval on every saved checkpoint through the
-Modal vLLM engine. Local artifacts land in runs/train_eval/<run_name>/:
+Modal vLLM engine. Local artifacts land in sft/runs/<run_name>/:
 
     config.yaml           copy of the config as run
     train_result.json     losses, checkpoint volume paths, mask verification
@@ -57,7 +57,7 @@ from cotcontrol.inference.modal_vllm import ModalGenerateConfig, make_generate_f
 from cotcontrol.training.config import TrainConfig, filter_dataclass_kwargs  # noqa: E402
 from cotcontrol.training.modal_app import load_sft_jsonl, train  # noqa: E402
 
-RUNS_DIR = ROOT / "runs" / "train_eval"
+RUNS_DIR = ROOT / "sft" / "runs"
 
 
 def load_config(path: Path) -> tuple[TrainConfig, dict, dict]:

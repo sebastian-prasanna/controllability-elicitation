@@ -30,6 +30,7 @@ cotcontrol/                 the library
     modal_app.py            the Modal train app + local train() entrypoint
 gepa/                       GEPA (reflective prompt evolution) on the eval; runs/ = run logs
 fewshot/                    few-shot scaling experiments
+sft/runs/                   train_eval.py run outputs (config, losses, per-checkpoint evals)
 scripts/                    thin launchers (baselines, BoN, prompt evals, dataset builders,
                             train_eval.py = config-driven train -> eval-every-checkpoint)
 configs/                    YAML run configs

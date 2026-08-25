@@ -45,6 +45,9 @@ train:
   # save_at_steps: [10, 40, 160]  # ... or exactly these steps
   # chat_template_kwargs:         # extra prompt-render kwargs, e.g. for gpt-oss:
   #   reasoning_effort: high
+  # attn_implementation: null     # null = sdpa (gpt-oss: eager). For gpt-oss on
+  #                               # long sequences use the FA3-with-sinks kernel
+  #                               # (Hopper only): kernels-community/vllm-flash-attn3
 
 lora:
   lora_rank: 32

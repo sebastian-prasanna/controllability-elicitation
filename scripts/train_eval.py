@@ -22,6 +22,8 @@ eval: section (all optional):
     seed: 0                    # question->mode assignment
     max_samples: null          # cap questions
     subsample_seed: null       # seeded random question subsample
+    split: null                # canonical split (train/val/test); use "val" for
+                               # checkpoint selection, "test" only for final reports
     system_prompt: ""          # literal string, or a path to a .txt file
     temperature: 0.0
     max_tokens: 12000
@@ -122,6 +124,7 @@ async def eval_checkpoints(tc: TrainConfig, ec: dict, train_result: dict, run_di
                 seed=int(ec.get("seed", 0)),
                 max_samples=ec.get("max_samples"),
                 subsample_seed=ec.get("subsample_seed"),
+                split=ec.get("split"),
                 judge_model=ec.get("judge_model", "openai/gpt-5-mini"),
                 judge_concurrency=int(ec.get("judge_concurrency", 200)),
                 backend_info={"base_model": tc.base_model, "lora_path": lora_path,

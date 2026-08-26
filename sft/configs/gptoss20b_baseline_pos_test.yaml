@@ -1,0 +1,34 @@
+# Small test run: gpt-oss-20b on its own baseline positives (TESTSPLIT-mined
+# data — infra check only, do NOT report test-split evals of this checkpoint).
+#   .venv/bin/python scripts/train_eval.py sft/configs/gptoss20b_baseline_pos_test.yaml
+
+run_name: gptoss20b-baseline-pos-test
+base_model: openai/gpt-oss-20b
+gpu: H200
+
+train:
+  data_path: sft/data/gptoss20b_baseline_pos_testsplit.jsonl   # 38 examples
+  lr: 1e-2
+  batch_size: 8
+  num_epochs: 4                 # ~20 optimizer steps
+  max_seq_length: 16384
+  save_every_n_steps: 5
+  attn_implementation: kernels-community/vllm-flash-attn3
+
+lora:
+  lora_rank: 32
+  lora_alpha: 32
+  lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+elicitation:
+  train_params: 1000
+  mask_seed: 0
+
+eval:
+  dataset: all
+  split: val                    # checkpoint selection split, never test
+  mode: random
+  max_samples: 30
+  max_tokens: 8000
+  max_model_len: 16384
+  parallel_checkpoints: 3

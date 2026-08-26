@@ -21,11 +21,22 @@ from gepa import GepaConfig, run_gepa  # noqa: E402  (gepa/gepa.py, via script d
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--train", required=True, help="train dataset (hle/gpqa/mmlu_pro)")
+    p.add_argument("--train", required=True, help="train dataset (all/hle/gpqa/mmlu_pro)")
+    p.add_argument(
+        "--no-final-test",
+        action="store_true",
+        help="skip the automatic best-prompt eval on the full test split",
+    )
     p.add_argument("--run-name", required=True)
     p.add_argument("--iterations", type=int, default=10)
     p.add_argument("--minibatch", type=int, default=16)
     p.add_argument("--pareto-size", type=int, default=48)
+    p.add_argument(
+        "--reflection-cap",
+        type=int,
+        default=32,
+        help="max rollouts shown to the reflection model (scoring uses the full minibatch)",
+    )
     p.add_argument("--max-tokens", type=int, default=16000)
     p.add_argument(
         "--max-concurrency",
@@ -59,6 +70,7 @@ def main():
         n_iterations=args.iterations,
         minibatch_size=args.minibatch,
         pareto_size=args.pareto_size,
+        reflection_max_rollouts=args.reflection_cap,
         max_tokens=args.max_tokens,
         max_concurrency=args.max_concurrency,
         task_model=args.task_model,
@@ -66,6 +78,7 @@ def main():
         judge_model=args.judge_model,
         objective=args.objective,
         general_advice_only=args.general_advice_only,
+        final_test=not args.no_final_test,
     )
     run_dir = Path(__file__).parent / "runs" / args.run_name
     asyncio.run(run_gepa(cfg, run_dir, resume=args.resume))

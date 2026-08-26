@@ -1,0 +1,37 @@
+# Multi-GPU (FSDP2) variant of the RL mechanics smoke: exercises DTensor mask
+# hooks, collective adapter gather/save, micro-batch count equalization across
+# ranks, the batch broadcast, and — the key unknown — lm_head called outside
+# the root FSDP forward in the chunked logprob path (the worker self-check
+# aborts if that breaks).
+run_name: smoke-rl-qwen06b-2gpu
+base_model: Qwen/Qwen3-0.6B
+
+train:
+  gpu: L40S:2
+  lr: 1e-2
+  per_device_batch_size: 2
+  max_seq_length: 4096
+  seed: 0
+
+rl:
+  iterations: 2
+  prompts_per_iter: 6
+  group_size: 4
+  rollout_max_tokens: 512
+  dataset: gpqa
+  split: train
+  reward: compliance_score
+  verify_mask_every: 1
+  handshake_timeout_s: 1800
+
+lora:
+  lora_rank: 32
+
+elicitation:
+  train_params: 1000
+  mask_seed: 0
+
+inference:
+  gpu: L40S
+  max_model_len: 4096
+  max_num_seqs: 64

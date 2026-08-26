@@ -93,6 +93,10 @@ class ModalGenerateConfig:
     num_samples: int = 1
     top_p: float = 1.0
     stop: Optional[List[str]] = None
+    # Return per-token logprobs + token ids (behavior-policy data for RL).
+    # Adds "token_ids"/"token_logprobs" (per sample) and "prompt_token_ids"
+    # (per prompt) to the result dicts; absent entirely when False.
+    return_logprobs: bool = False
     cache: bool = True
     # Extra kwargs for the chat template, e.g. {"reasoning_effort": "high"}
     # for gpt-oss. Part of the disk-cache key.
@@ -169,6 +173,7 @@ class InferenceEngine:
         top_p=1.0,
         num_samples=1,
         stop=None,
+        return_logprobs=False,
         add_generation_prompt=True,
         continue_final_message=False,
         chat_template_kwargs=None,
@@ -195,6 +200,11 @@ class InferenceEngine:
             top_p=top_p,
             stop=stop or None,
             skip_special_tokens=False,
+            # logprobs=0 -> only the sampled token's logprob at each position.
+            # vLLM v1 default logprobs_mode="raw_logprobs": log-softmax of the
+            # raw logits, BEFORE temperature/top-p (i.e. the model's own
+            # distribution, not the sampling distribution).
+            logprobs=0 if return_logprobs else None,
         )
         if lora_path:
             lora_kwargs = {}
@@ -211,10 +221,17 @@ class InferenceEngine:
             continue_final_message=continue_final_message,
             chat_template_kwargs=chat_template_kwargs or None,
         )
-        return [
-            [{"text": c.text, "finish_reason": c.finish_reason} for c in o.outputs]
-            for o in outputs
-        ]
+        def _sample(o, c):
+            d = {"text": c.text, "finish_reason": c.finish_reason}
+            if return_logprobs:
+                d["token_ids"] = list(c.token_ids)
+                d["token_logprobs"] = [
+                    lp[tid].logprob for tid, lp in zip(c.token_ids, c.logprobs)
+                ]
+                d["prompt_token_ids"] = list(o.prompt_token_ids)
+            return d
+
+        return [[_sample(o, c) for c in o.outputs] for o in outputs]
 
 
 def _is_app_running(app_obj) -> bool:
@@ -229,6 +246,8 @@ def _cache_key(model_id, messages, config: ModalGenerateConfig,
     blob = json.dumps(
         {
             "cache_version": 1,
+            # Only set when True so pre-existing (False) cache keys are unchanged.
+            **({"return_logprobs": True} if config.return_logprobs else {}),
             "backend": "modal-vllm",
             "model_id": model_id,
             "messages": messages,
@@ -261,11 +280,11 @@ def _load_cache(key: str) -> Optional[Dict]:
         return None
 
 
-def _save_cache(key: str, texts, finish_reasons) -> None:
+def _save_cache(key: str, texts, finish_reasons, extra: Optional[Dict] = None) -> None:
     fp = _cache_path(key)
     fp.parent.mkdir(parents=True, exist_ok=True)
     with fp.open("w") as f:
-        json.dump({"texts": texts, "finish_reasons": finish_reasons}, f)
+        json.dump({"texts": texts, "finish_reasons": finish_reasons, **(extra or {})}, f)
 
 
 def _lora_id_for(path: str) -> int:
@@ -321,9 +340,13 @@ async def generate_async(
         if config.cache:
             cached = _load_cache(ck)
             if cached is not None:
-                all_results[i] = _to_canonical(
+                result = _to_canonical(
                     msgs, model_id, cached["texts"], cached["finish_reasons"]
                 )
+                if config.return_logprobs:
+                    for k in ("token_ids", "token_logprobs", "prompt_token_ids"):
+                        result[k] = cached[k]
+                all_results[i] = result
                 continue
         uncached.append(i)
 
@@ -355,6 +378,7 @@ async def generate_async(
         top_p=config.top_p,
         num_samples=config.num_samples,
         stop=config.stop,
+        return_logprobs=config.return_logprobs,
         add_generation_prompt=add_generation_prompt,
         continue_final_message=continue_final_message,
         chat_template_kwargs=config.chat_template_kwargs,
@@ -374,9 +398,19 @@ async def generate_async(
         samples = outputs_per_prompt[j]
         texts = [s["text"] for s in samples]
         fins = [s["finish_reason"] for s in samples]
+        extra = None
+        if config.return_logprobs:
+            extra = {
+                "token_ids": [s["token_ids"] for s in samples],
+                "token_logprobs": [s["token_logprobs"] for s in samples],
+                "prompt_token_ids": samples[0]["prompt_token_ids"],
+            }
         if config.cache:
-            _save_cache(cache_keys[idx], texts, fins)
-        all_results[idx] = _to_canonical(messages_list[idx], model_id, texts, fins)
+            _save_cache(cache_keys[idx], texts, fins, extra)
+        result = _to_canonical(messages_list[idx], model_id, texts, fins)
+        if extra:
+            result.update(extra)
+        all_results[idx] = result
 
     return all_results
 

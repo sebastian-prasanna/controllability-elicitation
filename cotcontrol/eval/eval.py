@@ -69,6 +69,7 @@ async def eval_cotcontrolqa(
     save_name: Optional[str] = None,
     dataset: str | Path = "gpqa",
     mode: str = "word_suppression",
+    allowed_modes: Optional[list[str]] = None,
     user_prompt_template: str = "{question}",
     prefix_messages: Optional[list[dict]] = None,
     seed: int = 0,
@@ -76,6 +77,7 @@ async def eval_cotcontrolqa(
     domains: Optional[list[str]] = None,
     max_samples: Optional[int] = None,
     subsample_seed: Optional[int] = None,
+    split: Optional[str] = None,
     grade_meta_discussion: bool = False,
     judge_model: str = "openai/gpt-5-mini",
     judge_concurrency: int = 200,
@@ -96,8 +98,10 @@ async def eval_cotcontrolqa(
     dataset="all" runs gpqa + hle + mmlu_pro (1214 questions).
     mode="random" assigns each question one of the 9 constraint modes at
     random (seeded by `seed`); mode="all" runs every question under all 9
-    constraint modes. Questions without keyword metadata (45 of 1214) can't
-    be assigned the two word-suppression modes.
+    constraint modes. allowed_modes restricts the pool "random"/"all" draw
+    from (e.g. RL training on the 8 programmatic modes only). Questions
+    without keyword metadata (45 of 1214) can't be assigned the two
+    word-suppression modes.
 
     user_prompt_template wraps the fully-built user message (question + choices
     + constraint requirement), which is substituted for {question} — use it to
@@ -132,11 +136,11 @@ async def eval_cotcontrolqa(
         temperature=1.0, max_tokens=10000, max_concurrency=judge_concurrency
     )
 
-    samples = load_dataset(dataset, mode, domains, max_samples, subsample_seed)
+    samples = load_dataset(dataset, mode, domains, max_samples, subsample_seed, split)
     if not samples:
         raise ValueError("No samples left after filtering")
 
-    tasks = assign_tasks(samples, mode, seed)
+    tasks = assign_tasks(samples, mode, seed, allowed_modes=allowed_modes)
 
     backend = "custom" if generate_fn is not None else "openrouter"
     print(f"CoT-Control-QA [{backend}]: {model} | dataset={dataset} | mode={mode} | "
@@ -186,26 +190,30 @@ async def eval_cotcontrolqa(
             reasoning_text = _extract_reasoning_text(output, reasoning, non_reasoning)
 
             extracted = extract_answer(output)
-            rollouts.append(
-                {
-                    "output": output,
-                    "reasoning": reasoning,
-                    "reasoning_text_graded": reasoning_text,
-                    "extracted_answer": extracted,
-                    "correct": (extracted == target_letter) if not meta["error"] else None,
-                    "compliance": (
-                        grade_compliance(task_mode, reasoning_text, sample)
-                        if not meta["error"]
-                        else None
-                    ),
-                    "meta_discussion": None,
-                    "judge": {},
-                    "finish_reason": meta["finish_reason"],
-                    "usage": meta["usage"],
-                    "error": meta["error"],
-                    "raw_response": meta["raw_response"],
-                }
-            )
+            rollout = {
+                "output": output,
+                "reasoning": reasoning,
+                "reasoning_text_graded": reasoning_text,
+                "extracted_answer": extracted,
+                "correct": (extracted == target_letter) if not meta["error"] else None,
+                "compliance": (
+                    grade_compliance(task_mode, reasoning_text, sample)
+                    if not meta["error"]
+                    else None
+                ),
+                "meta_discussion": None,
+                "judge": {},
+                "finish_reason": meta["finish_reason"],
+                "usage": meta["usage"],
+                "error": meta["error"],
+                "raw_response": meta["raw_response"],
+            }
+            # Behavior-policy token data (Modal vLLM with return_logprobs=True;
+            # consumed by the GRPO trainer). Absent otherwise.
+            if "token_ids" in gen:
+                rollout["token_ids"] = gen["token_ids"][j]
+                rollout["token_logprobs"] = gen["token_logprobs"][j]
+            rollouts.append(rollout)
 
         records.append(
             {
@@ -225,6 +233,8 @@ async def eval_cotcontrolqa(
                 "system_prompt": system_prompt,
                 "user_prompt": user_prompt,
                 "messages": messages,
+                **({"prompt_token_ids": gen["prompt_token_ids"]}
+                   if "prompt_token_ids" in gen else {}),
                 "samples": rollouts,
             }
         )
@@ -315,6 +325,7 @@ async def eval_cotcontrolqa(
             "backend_info": backend_info,
             "dataset": str(dataset),
             "mode": mode,
+            "allowed_modes": allowed_modes,
             "system_prompt": system_prompt,
             "user_prompt_template": user_prompt_template,
             "prefix_messages": prefix_messages,
@@ -323,6 +334,7 @@ async def eval_cotcontrolqa(
             "domains": domains,
             "max_samples": max_samples,
             "subsample_seed": subsample_seed,
+            "split": split,
             "generate_config": dataclasses.asdict(generate_config),
             "judge_model": judge_model,
             "judge_config": dataclasses.asdict(judge_config),

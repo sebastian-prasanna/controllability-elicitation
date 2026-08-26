@@ -1,0 +1,36 @@
+# Mechanics smoke for the GRPO loop (~$1-2, ~15 min): Qwen3-0.6B on L40S,
+# 3 iterations of 6 prompts x 4 rollouts. Validates the full protocol —
+# adapter publish/commit, driver rollout+grade+upload, volume handshake,
+# logprob self-check, masked update, mask verification — not learning.
+run_name: smoke-rl-qwen06b
+base_model: Qwen/Qwen3-0.6B
+
+train:
+  gpu: L40S
+  lr: 1e-2              # sparse-mask regime (see sft smoke); smoke only
+  per_device_batch_size: 2
+  max_seq_length: 4096
+  seed: 0
+
+rl:
+  iterations: 3
+  prompts_per_iter: 6
+  group_size: 4
+  rollout_max_tokens: 512
+  dataset: gpqa
+  split: train
+  reward: compliance_score
+  verify_mask_every: 1
+  handshake_timeout_s: 1800
+
+lora:
+  lora_rank: 32
+
+elicitation:
+  train_params: 1000
+  mask_seed: 0
+
+inference:
+  gpu: L40S
+  max_model_len: 4096
+  max_num_seqs: 64

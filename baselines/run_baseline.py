@@ -16,8 +16,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cotcontrol.eval.eval import eval_cotcontrolqa  # noqa: E402
+from cotcontrol.eval.grading import shaped_compliance  # noqa: E402
 from cotcontrol.inference.openrouter import GenerateConfig  # noqa: E402
-from gepa.gepa import shaped_compliance  # noqa: E402
 
 
 def _summ(tasks: list[dict]) -> dict:
@@ -39,10 +39,12 @@ async def main():
     p.add_argument("--split", default="test", choices=["train", "val", "test"],
                    help="canonical split; non-test runs land in <label>_<split>/ "
                         "(e.g. train-split rollouts for mining SFT positives)")
+    p.add_argument("--out-dir", default=None,
+                   help="override output directory (default: baselines/<label>[_<split>]/)")
     args = p.parse_args()
 
     label = args.label if args.split == "test" else f"{args.label}_{args.split}"
-    out_dir = Path(__file__).parent / label
+    out_dir = Path(args.out_dir) if args.out_dir else Path(__file__).parent / label
     r = await eval_cotcontrolqa(
         model=args.model,
         system_prompt="",

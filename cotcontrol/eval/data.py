@@ -91,23 +91,36 @@ def load_dataset(
     domains: Optional[list[str]] = None,
     max_samples: Optional[int] = None,
     subsample_seed: Optional[int] = None,
+    split: Optional[str] = None,
 ) -> list[dict]:
     """Load CoT-Control-QA dataset(s) into a list of sample dicts.
 
     dataset="all" loads gpqa + hle + mmlu_pro. Rows without keywords are
     skipped only when mode is itself a word-suppression mode (as upstream);
     for mode="all"/"random" they stay and just can't be assigned those modes.
-    Filters: domains (case-insensitive), then max_samples. With
+    split="train"/"val"/"test" filters to the canonical split in
+    datasets/splits.json (built by scripts/build_splits.py); None uses all
+    rows. Filters: split, domains (case-insensitive), then max_samples. With
     subsample_seed set, max_samples questions are drawn at random (same seed
     -> same fold, e.g. for minibatch evals); otherwise the first N are taken.
     """
+    split_ids: Optional[dict] = None
+    if split is not None:
+        all_splits = json.loads((DATASETS_DIR / "splits.json").read_text())["splits"]
+        split_ids = {stem: set(s[split]) for stem, s in all_splits.items()}
+
     names = ALL_DATASETS if str(dataset) == "all" else [dataset]
     samples = []
     for name in names:
         data_file = DATASET_ALIASES.get(str(name), Path(name))
         if not data_file.exists():
             raise FileNotFoundError(f"Dataset not found: {data_file}")
-        samples.extend(_load_one_csv(data_file, data_file.stem))
+        rows = _load_one_csv(data_file, data_file.stem)
+        if split_ids is not None:
+            if data_file.stem not in split_ids:
+                raise KeyError(f"No split defined for {data_file.stem} in splits.json")
+            rows = [r for r in rows if r["id"] in split_ids[data_file.stem]]
+        samples.extend(rows)
 
     if mode in KEYWORD_MODES:
         samples = [s for s in samples if s["keywords"]]
@@ -122,16 +135,29 @@ def load_dataset(
     return samples
 
 
-def assign_tasks(samples: list[dict], mode: str, seed: int = 0) -> list[tuple[dict, str]]:
+def assign_tasks(
+    samples: list[dict],
+    mode: str,
+    seed: int = 0,
+    allowed_modes: Optional[list[str]] = None,
+) -> list[tuple[dict, str]]:
     """Assign a constraint mode to each sample -> list of (sample, mode) tasks.
 
     mode="all": every sample x every valid mode; mode="random": one seeded
     random valid mode per sample; otherwise the given mode for every sample.
     Keyword modes are only valid for samples with keyword metadata.
+    allowed_modes restricts the pool "all"/"random" draw from (e.g. RL training
+    on the programmatic modes only); it doesn't affect an explicit mode.
     """
+    pool = CONSTRAINT_MODES if allowed_modes is None else [
+        m for m in CONSTRAINT_MODES if m in set(allowed_modes)
+    ]
+    if allowed_modes is not None and len(pool) != len(set(allowed_modes)):
+        unknown = set(allowed_modes) - set(CONSTRAINT_MODES)
+        raise ValueError(f"unknown constraint modes: {sorted(unknown)}")
 
     def _valid_modes(sample):
-        return [m for m in CONSTRAINT_MODES if sample["keywords"] or m not in KEYWORD_MODES]
+        return [m for m in pool if sample["keywords"] or m not in KEYWORD_MODES]
 
     def _with_mode(sample, m):
         s = {k: v for k, v in sample.items() if k != "keywords"}

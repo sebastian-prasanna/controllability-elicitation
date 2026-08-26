@@ -1,0 +1,26 @@
+run_name: sweep-qwen8b-lr1e-3-k100k
+base_model: Qwen/Qwen3-8B
+train:
+  gpu: H200
+  lr: 1e-3
+  per_device_batch_size: 1
+  max_seq_length: 16384
+  gradient_checkpointing: true
+  seed: 0
+rl:
+  iterations: 25
+  prompts_per_iter: 32
+  group_size: 8
+  rollout_max_tokens: 12000
+  dataset: all
+  split: train
+  reward: compliance_score
+  verify_mask_every: 10
+lora:
+  lora_rank: 32
+elicitation:
+  train_params: 100000
+  mask_seed: 0
+inference:
+  gpu: H200
+  max_model_len: 16384

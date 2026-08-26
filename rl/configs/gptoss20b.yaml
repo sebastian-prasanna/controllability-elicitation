@@ -1,0 +1,48 @@
+# GRPO on gpt-oss-20b, masked attention-only LoRA. STARTING POINT — lr and
+# train_params need sweeping (same caveat as qwen3_8b.yaml).
+#
+# gpt-oss notes:
+# - FA3-with-sinks kernel: backward verified exact for q/k/v/o LoRA
+#   (scripts/check_fa3_layer_grads.py, 2026-08-26); the sink param gets no
+#   gradient but is frozen under LoRA anyway. Required for long sequences —
+#   eager is ~13GB/layer of attention matrices at 10k tokens.
+# - Experts stay MXFP4 at rollout time (vLLM serves the stock checkpoint +
+#   bf16 attention adapter) but are bf16-dequantized at train time — expect a
+#   larger train-vs-rollout logprob gap than qwen. WATCH logprob_corr in
+#   metrics.jsonl: qwen baseline is ~0.998; if gpt-oss sits far below that,
+#   consider serving a bf16 checkpoint (needs vllm>=0.24 in the inference
+#   image).
+run_name: rl-gptoss20b
+base_model: openai/gpt-oss-20b
+
+train:
+  gpu: H200
+  lr: 1e-3
+  per_device_batch_size: 1
+  max_seq_length: 16384
+  gradient_checkpointing: true
+  attn_implementation: kernels-community/vllm-flash-attn3
+  chat_template_kwargs:
+    reasoning_effort: high
+  seed: 0
+
+rl:
+  iterations: 150
+  prompts_per_iter: 32
+  group_size: 8
+  rollout_max_tokens: 12000
+  dataset: all
+  split: train
+  reward: compliance_score
+  verify_mask_every: 10
+
+lora:
+  lora_rank: 32
+
+elicitation:
+  train_params: 100000
+  mask_seed: 0
+
+inference:
+  gpu: H200
+  max_model_len: 16384

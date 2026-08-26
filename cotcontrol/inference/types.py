@@ -11,6 +11,14 @@ return the same canonical schema — one dict per prompt:
         "metadata": [{"finish_reason", "usage", "error", "raw_response"}, ...],
     }
 
+With ModalGenerateConfig(return_logprobs=True) the modal/vLLM backend adds
+(absent otherwise, so existing result JSON stays byte-compatible):
+
+        "token_ids": [[<int>, ...], ...],          # length num_samples
+        "token_logprobs": [[<float>, ...], ...],   # length num_samples; raw
+                                                   #   (pre-temperature) logprobs
+        "prompt_token_ids": [<int>, ...],          # post-chat-template
+
 OpenRouter returns reasoning as a separate field on the API response; the
 modal/vLLM backend gets one raw completion string and splits it with
 `split_reasoning` below.

@@ -1,0 +1,34 @@
+# GRPO on Qwen3-8B, masked-LoRA elicitation. STARTING POINT — lr and
+# train_params need sweeping; the SFT sparse-mask regime used lr 1e-2 but RL
+# gradients are far noisier, so this starts 10x lower.
+run_name: rl-qwen8b
+base_model: Qwen/Qwen3-8B
+
+train:
+  gpu: H200
+  lr: 1e-3
+  per_device_batch_size: 1
+  max_seq_length: 16384
+  gradient_checkpointing: true
+  seed: 0
+
+rl:
+  iterations: 150
+  prompts_per_iter: 32
+  group_size: 8
+  rollout_max_tokens: 12000
+  dataset: all
+  split: train
+  reward: compliance_score
+  verify_mask_every: 10
+
+lora:
+  lora_rank: 32
+
+elicitation:
+  train_params: 100000
+  mask_seed: 0
+
+inference:
+  gpu: H200
+  max_model_len: 16384

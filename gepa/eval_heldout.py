@@ -15,13 +15,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cotcontrol.eval.eval import eval_cotcontrolqa  # noqa: E402
-from gepa import shaped_compliance, task_score  # noqa: E402  (gepa/gepa.py, via script dir)
+from cotcontrol.eval.grading import shaped_compliance, task_score  # noqa: E402
 from cotcontrol.inference.openrouter import GenerateConfig  # noqa: E402
 
 HELDOUT_SUBSAMPLE_SEED = 9000  # fixed fold, distinct from train folds
 
 
-async def eval_prompt(system_prompt, dataset, cfg_json, n, save_dir):
+async def eval_prompt(system_prompt, dataset, cfg_json, n, save_dir, split="test"):
     r = await eval_cotcontrolqa(
         model=cfg_json["task_model"],
         system_prompt=system_prompt,
@@ -36,6 +36,7 @@ async def eval_prompt(system_prompt, dataset, cfg_json, n, save_dir):
         seed=cfg_json["mode_seed"],
         max_samples=n,
         subsample_seed=HELDOUT_SUBSAMPLE_SEED,
+        split=split,
         judge_model=cfg_json["judge_model"],
     )
     scores, shaped = [], []
@@ -71,7 +72,10 @@ async def main():
     p.add_argument("--run-dir", required=True)
     p.add_argument("--datasets", nargs="+", required=True)
     p.add_argument("--n", type=int, default=120)
+    p.add_argument("--split", default="test",
+                   help="canonical split to eval on (default test; 'none' for full dataset)")
     args = p.parse_args()
+    split = None if args.split == "none" else args.split
 
     run_dir = Path(args.run_dir)
     cfg_json = json.loads((run_dir / "config.json").read_text())
@@ -80,13 +84,14 @@ async def main():
 
     for dataset in args.datasets:
         print(f"\n=== Held-out eval on {dataset} (n={args.n}) ===")
-        baseline = await eval_prompt("", dataset, cfg_json, args.n, save_root / "baseline")
+        baseline = await eval_prompt("", dataset, cfg_json, args.n, save_root / "baseline", split)
         optimized = await eval_prompt(
-            best["prompt"], dataset, cfg_json, args.n, save_root / f"best_cand{best['id']}"
+            best["prompt"], dataset, cfg_json, args.n, save_root / f"best_cand{best['id']}", split
         )
         comparison = {
             "dataset": dataset,
             "n": args.n,
+            "split": split,
             "train_dataset": cfg_json["train_dataset"],
             "best_candidate_id": best["id"],
             "best_prompt": best["prompt"],

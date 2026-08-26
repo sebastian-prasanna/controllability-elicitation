@@ -1,0 +1,37 @@
+# Multi-GPU (FSDP2) RL mechanics smoke on Qwen3-8B (the smallest real target;
+# 0.6B can't be used here — tied embeddings break FSDP2 auto-wrap, see the
+# worker guard). Exercises DTensor mask hooks, collective adapter gather/save,
+# per-rank micro-batch equalization, batch broadcast, and lm_head called
+# outside the root FSDP forward (the self-check aborts if that breaks).
+run_name: smoke-rl-qwen8b-2gpu
+base_model: Qwen/Qwen3-8B
+
+train:
+  gpu: L40S:2
+  lr: 1e-2
+  per_device_batch_size: 1
+  max_seq_length: 4096
+  seed: 0
+
+rl:
+  iterations: 2
+  prompts_per_iter: 6
+  group_size: 4
+  rollout_max_tokens: 512
+  dataset: gpqa
+  split: train
+  reward: compliance_score
+  verify_mask_every: 1
+  handshake_timeout_s: 1800
+
+lora:
+  lora_rank: 32
+
+elicitation:
+  train_params: 1000
+  mask_seed: 0
+
+inference:
+  gpu: L40S
+  max_model_len: 4096
+  max_num_seqs: 32

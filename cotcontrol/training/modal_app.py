@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import asdict
@@ -129,95 +130,137 @@ use_cpu: false
 """
 
 
-@app.cls(
+def _launch_worker(
+    worker_file: str, config_dict: dict, run_name: str, line_hook=None
+) -> dict:
+    """Shared remote-side launch: write config, shell out to `accelerate
+    launch <worker_file>` streaming stdout (through line_hook if given),
+    commit volumes, return results.json. Runs INSIDE the Modal container."""
+    workdir = Path(f"/tmp/cotcontrol/{run_name}")
+    workdir.mkdir(parents=True, exist_ok=True)
+    (workdir / "config.json").write_text(json.dumps(config_dict))
+
+    output_dir = f"{CHECKPOINTS_PATH}/{run_name}"
+    os.makedirs(output_dir, exist_ok=True)
+
+    import torch
+
+    num_gpus = torch.cuda.device_count()
+    print(f"[modal] run_name={run_name} num_gpus={num_gpus} "
+          f"base_model={config_dict.get('base_model')}")
+
+    # Inside the container, add_local_python_source puts the package at
+    # /root/cotcontrol, so workers sit next to this file.
+    worker = Path(__file__).parent / worker_file
+    use_fsdp = num_gpus > 1 and config_dict.get("parallelism", "fsdp") == "fsdp"
+    if use_fsdp:
+        # FSDP is configured via an accelerate config file (not
+        # TrainingArguments): cpu_ram_efficient_loading meta-loading must be
+        # in place before the worker loads the model.
+        fsdp_version = int(config_dict.get("fsdp_version", 2))
+        fsdp_yaml = workdir / "accelerate_fsdp.yaml"
+        fsdp_yaml.write_text(_accelerate_fsdp_config(num_gpus, fsdp_version))
+        cmd = ["accelerate", "launch", "--config_file", str(fsdp_yaml)]
+    else:
+        cmd = [
+            "accelerate", "launch",
+            "--num_processes", str(num_gpus),
+            "--num_machines", "1",
+            "--mixed_precision", "bf16",
+        ]
+    cmd += [
+        str(worker),
+        "--workdir", str(workdir),
+        "--output-dir", output_dir,
+        "--num-gpus", str(num_gpus),
+    ]
+    # expandable_segments: lets the reserved-but-unallocated pool satisfy
+    # later allocations instead of OOMing from fragmentation.
+    env = {
+        **os.environ,
+        "PYTHONPATH": "/root",
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+    }
+
+    output_lines: list[str] = []
+    proc = subprocess.Popen(
+        cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        output_lines.append(line)
+        if line_hook is not None:
+            line_hook(line, workdir)
+    proc.wait()
+    # Commit even on failure so partial checkpoints/logs are inspectable.
+    checkpoints_vol.commit()
+    hf_cache_vol.commit()
+    if proc.returncode != 0:
+        tail = "".join(output_lines[-80:])
+        raise RuntimeError(
+            f"accelerate launch exited {proc.returncode}.\nLast output:\n{tail}"
+        )
+
+    results_path = workdir / "results.json"
+    if not results_path.exists():
+        raise RuntimeError("Training finished but no results.json was produced.")
+    return json.loads(results_path.read_text())
+
+
+_REMOTE_CLS_KWARGS = dict(
     image=train_image,
     volumes={CHECKPOINTS_PATH: checkpoints_vol, HF_CACHE_PATH: hf_cache_vol},
     secrets=_SECRETS,
     timeout=24 * 3600,
     # Display/fallback default only — every run overrides via
-    # `.with_options(gpu=config.gpu, ...)` in train().
+    # `.with_options(gpu=config.gpu, ...)` at submit time.
     gpu="H200",
     # Training is expensive: fail loudly, never silently rerun a long job.
     retries=modal.Retries(max_retries=0),
 )
+
+
+@app.cls(**_REMOTE_CLS_KWARGS)
 class _TrainRemote:
     @modal.method()
     def run(self, config_dict: dict, dataset: list[dict], run_name: str) -> dict:
         """Write inputs to /tmp, shell out to `accelerate launch worker.py`."""
         workdir = Path(f"/tmp/cotcontrol/{run_name}")
         workdir.mkdir(parents=True, exist_ok=True)
-
-        (workdir / "config.json").write_text(json.dumps(config_dict))
         with (workdir / "dataset.jsonl").open("w") as f:
             for row in dataset:
                 f.write(json.dumps(row) + "\n")
+        return _launch_worker("worker.py", config_dict, run_name)
 
-        output_dir = f"{CHECKPOINTS_PATH}/{run_name}"
-        os.makedirs(output_dir, exist_ok=True)
 
-        import torch
-
-        num_gpus = torch.cuda.device_count()
-        print(f"[modal] run_name={run_name} num_gpus={num_gpus} "
-              f"base_model={config_dict.get('base_model')}")
-
-        # Inside the container, add_local_python_source puts the package at
-        # /root/cotcontrol, so the worker sits next to this file.
-        worker = Path(__file__).parent / "worker.py"
-        use_fsdp = num_gpus > 1 and config_dict.get("parallelism", "fsdp") == "fsdp"
-        if use_fsdp:
-            # FSDP is configured via an accelerate config file (not
-            # TrainingArguments): cpu_ram_efficient_loading meta-loading must be
-            # in place before the worker loads the model.
-            fsdp_version = int(config_dict.get("fsdp_version", 2))
-            fsdp_yaml = workdir / "accelerate_fsdp.yaml"
-            fsdp_yaml.write_text(_accelerate_fsdp_config(num_gpus, fsdp_version))
-            cmd = ["accelerate", "launch", "--config_file", str(fsdp_yaml)]
-        else:
-            cmd = [
-                "accelerate", "launch",
-                "--num_processes", str(num_gpus),
-                "--num_machines", "1",
-                "--mixed_precision", "bf16",
-            ]
-        cmd += [
-            str(worker),
-            "--workdir", str(workdir),
-            "--output-dir", output_dir,
-            "--num-gpus", str(num_gpus),
-        ]
-        # expandable_segments: lets the reserved-but-unallocated pool satisfy
-        # later allocations instead of OOMing from fragmentation.
-        env = {
-            **os.environ,
-            "PYTHONPATH": "/root",
-            "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
-        }
-
-        output_lines: list[str] = []
-        proc = subprocess.Popen(
-            cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1,
-        )
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            sys.stdout.write(line)
-            sys.stdout.flush()
-            output_lines.append(line)
-        proc.wait()
-        # Commit even on failure so partial checkpoints/logs are inspectable.
+def _volsync_hook(line: str, workdir: Path) -> None:
+    """rl_worker <-> volume sync protocol: the worker subprocess cannot commit
+    or reload the mounted volume itself (the handles live in this process), so
+    it prints "@@VOLSYNC:<commit|reload>:<n>@@" and blocks until we perform the
+    op and touch the ack file (same container, shared /tmp)."""
+    m = re.search(r"@@VOLSYNC:(commit|reload):(\d+)@@", line)
+    if not m:
+        return
+    op, n = m.group(1), m.group(2)
+    if op == "commit":
         checkpoints_vol.commit()
-        hf_cache_vol.commit()
-        if proc.returncode != 0:
-            tail = "".join(output_lines[-80:])
-            raise RuntimeError(
-                f"accelerate launch exited {proc.returncode}.\nLast output:\n{tail}"
-            )
+    else:
+        checkpoints_vol.reload()
+    (workdir / f"volsync_ack_{n}").touch()
 
-        results_path = workdir / "results.json"
-        if not results_path.exists():
-            raise RuntimeError("Training finished but no results.json was produced.")
-        return json.loads(results_path.read_text())
+
+@app.cls(**_REMOTE_CLS_KWARGS)
+class _RLRemote:
+    @modal.method()
+    def run(self, config_dict: dict, run_name: str) -> dict:
+        """GRPO worker launch. No dataset ships — the local driver
+        (rl/run_grpo.py) supplies graded rollout batches over the checkpoints
+        volume, keyed to the adapter checkpoints the worker publishes."""
+        return _launch_worker("rl_worker.py", config_dict, run_name,
+                              line_hook=_volsync_hook)
 
 
 def load_sft_jsonl(
@@ -273,3 +316,14 @@ def train(
             return _go()
     with app.run():
         return _go()
+
+
+def spawn_rl(config) -> "modal.FunctionCall":
+    """Submit a GRPO run without blocking (the caller — rl/run_grpo.py — must
+    already hold app.run() open and keep it open: it serves rollouts to the
+    worker concurrently). Returns the FunctionCall; .get() it after the rollout
+    loop finishes. run_name timestamping is the caller's job."""
+    if parse_gpu_count(config.gpu) < 1:
+        raise ValueError(f"Invalid gpu spec: {config.gpu!r}")
+    cls = _RLRemote.with_options(gpu=config.gpu, timeout=config.timeout_seconds)
+    return cls().run.spawn(asdict(config), config.run_name)

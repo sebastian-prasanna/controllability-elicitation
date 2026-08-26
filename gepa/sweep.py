@@ -37,26 +37,37 @@ RUNS_DIR = REPO_ROOT / "gepa" / "runs"
 # Configuration — edit these for each sweep.
 # ---------------------------------------------------------------------------
 
-SWEEP_NAME = "sweep_models"
+SWEEP_NAME = "initial_sweep"
 
 # Flags applied to every run (any run_gepa.py flag). Axes override these.
 BASE_FLAGS: dict[str, Any] = {
-    "--train": "hle",
+    "--train": "all",  # combined hle+gpqa+mmlu_pro train split
     "--objective": "compliance",
-    # 16 simultaneous runs: keep per-run concurrency modest. Two runs share each
-    # task model, so this is ~2x per model at OpenRouter.
-    "--max-concurrency": 64,
+    # Best above-length-trend teacher in the gptoss_refl_* sweep: compliance
+    # gains without shortening the reasoning (see gepa/analysis/).
+    "--reflection-model": "anthropic/claude-fable-5",
+    # Accept/reject noise scales 1/sqrt(n); n=64 scores are decoupled from the
+    # reflection prompt, which sees a stride-sampled cap of 32 rollouts.
+    "--minibatch": 64,
+    "--reflection-cap": 32,
+    # Pareto fold picks the final test-eval candidate; n=128 tightens that
+    # selection (val split has 200 questions, so headroom remains).
+    "--pareto-size": 128,
+    # Per-run OpenRouter concurrency cap defaults to 200 (run_gepa.py); the
+    # client retries 429s with backoff, so oversubscription self-throttles.
+    # Uncomment to lower if the sweep starves other work on the same key.
+    # "--max-concurrency": 64,
 }
 
 MODELS = [
-    ("qwen8b", "qwen/qwen3-8b"),
-    ("qwen30b", "qwen/qwen3-30b-a3b"),
-    ("qwen36-35b", "qwen/qwen3.6-35b-a3b"),
+    ("gptoss20b", "openai/gpt-oss-20b"),
     ("gptoss120b", "openai/gpt-oss-120b"),
-    ("glm52", "z-ai/glm-5.2"),
+    ("qwen8b", "qwen/qwen3-8b"),
+    ("qwen32b", "qwen/qwen3-32b"),
+    ("glm53", "z-ai/glm-5.3"),
     ("kimik3", "moonshotai/kimi-k3"),
     ("dsv4pro", "deepseek/deepseek-v4-pro-0813"),
-    ("qwen38-2.4t", "qwen/qwen3.8-2.4t-a95b"),
+    ("oxalpha", "stealth/ox-alpha"),
 ]
 
 SWEEP_AXES: list[list[dict[str, Any]]] = [
@@ -120,6 +131,12 @@ def build_runs(resume: bool) -> list[tuple[str, list[str]]]:
 def launch_tmux(runs: list[tuple[str, list[str]]], delay: int) -> None:
     session = tmux_safe(SWEEP_NAME)
     subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
+
+    # Snapshot this script into the sweep dir so every run records the exact
+    # version (CONFIG block included) that launched it.
+    sweep_dir = RUNS_DIR / SWEEP_NAME
+    sweep_dir.mkdir(parents=True, exist_ok=True)
+    (sweep_dir / "sweep.py").write_text(Path(__file__).read_text())
 
     for i, (run_name, argv) in enumerate(runs):
         window = tmux_safe(run_name)

@@ -131,6 +131,74 @@ class TrainConfig:
             self.save_at_steps = [int(s) for s in self.save_at_steps]
 
 
+@dataclass
+class RLConfig(TrainConfig):
+    """GRPO RL on controllability. Extends TrainConfig (model/LoRA/masking/
+    Modal fields reused; SFT-only fields like data_path/num_epochs are ignored).
+
+    One iteration = save adapter -> driver serves it via vLLM LoRA hot-swap and
+    returns graded rollouts -> one optimizer batch (inner_epochs passes).
+    Rollout sampling MUST be temperature-only (top_p=1, no top_k): vLLM reports
+    logprobs of the pre-truncation distribution, so nucleus sampling would make
+    the behavior logprobs (and hence the TIS correction) wrong.
+    """
+
+    # --- loop shape ---
+    iterations: int = 50            # rollout->update rounds
+    prompts_per_iter: int = 32      # groups (questions) per iteration
+    group_size: int = 8             # G rollouts per prompt
+    inner_epochs: int = 1           # passes over each batch (>1 -> PPO clip active)
+
+    # --- rollouts (driver side) ---
+    rollout_temperature: float = 1.0
+    rollout_max_tokens: int = 8192
+    dataset: str = "all"            # gpqa | hle | mmlu_pro | all
+    split: str = "train"
+    # The 8 programmatic constraint modes (CONSTRAINT_MODES minus
+    # ignore_question, whose grader is ~3 sync LLM-judge calls per rollout).
+    modes: object = (
+        "word_suppression", "multiple_word_suppression", "repeat_sentences",
+        "end_of_sentence", "lowercase_thinking", "meow_between_words",
+        "uppercase_thinking", "alternating_case",
+    )
+    system_prompt: str = ""
+    # compliance_score (shaped + 2*strict)/3 | shaped_task_score | shaped_compliance
+    reward: str = "compliance_score"
+    inference_gpu: Optional[str] = None  # None = driver derives from base model
+
+    # --- GRPO loss ---
+    tis_cap: float = 2.0
+    advantage_scale: str = "none"   # "none" (Dr.GRPO) or "group" (TRL default)
+    clip_eps: float = 0.2
+    loss_type: str = "dapo"
+    drop_degenerate_groups: bool = True
+    drop_truncated: bool = False    # drop rollouts cut off at max_tokens
+    logprob_chunk_size: int = 1024  # selective-logprob chunk (memory knob)
+
+    # --- cadence / safety ---
+    verify_mask_every: int = 10     # iterations between mask verifications
+    handshake_timeout_s: int = 5400  # max wait for driver batch / worker adapter
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        for f in ("rollout_temperature", "tis_cap", "clip_eps"):
+            setattr(self, f, float(getattr(self, f)))
+        for f in ("iterations", "prompts_per_iter", "group_size", "inner_epochs",
+                  "rollout_max_tokens", "verify_mask_every", "handshake_timeout_s",
+                  "logprob_chunk_size"):
+            setattr(self, f, int(getattr(self, f)))
+        if self.rollout_temperature != 1.0:
+            # vLLM 0.23 returns RAW (pre-temperature) logprobs; at temperature
+            # 1.0 raw == sampling-distribution so the TIS ratios are exact.
+            # Other temperatures need logprobs_mode="processed_logprobs" at
+            # vLLM engine construction — plumb that before allowing this.
+            raise ValueError(
+                f"rollout_temperature must be 1.0 (got {self.rollout_temperature}): "
+                "vLLM returns pre-temperature logprobs, which only match the "
+                "sampling distribution at temperature 1."
+            )
+
+
 def filter_dataclass_kwargs(cls, kwargs: dict) -> dict:
     """Drop keys that aren't fields of ``cls`` — lets a YAML carry extra
     sections (eval config, notes) without breaking TrainConfig(**...)."""

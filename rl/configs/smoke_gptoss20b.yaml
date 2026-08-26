@@ -1,0 +1,42 @@
+# gpt-oss-20b RL mechanics smoke (~$10, ~30 min): proves the full GRPO
+# round-trip on gpt-oss — harmony prompt/token rebuild, MXFP4-serve vs
+# bf16-train logprob mismatch (READ logprob_corr in metrics.jsonl: qwen
+# baseline ~0.998), FA3 training path, masked update + verification.
+# reasoning_effort low + 3000 max tokens keep traces short; truncated
+# rollouts are kept (drop_truncated=false) — mechanics, not learning.
+run_name: smoke-rl-gptoss20b
+base_model: openai/gpt-oss-20b
+
+train:
+  gpu: H200
+  lr: 1e-2
+  per_device_batch_size: 1
+  max_seq_length: 8192
+  gradient_checkpointing: true
+  attn_implementation: kernels-community/vllm-flash-attn3
+  chat_template_kwargs:
+    reasoning_effort: low
+  seed: 0
+
+rl:
+  iterations: 3
+  prompts_per_iter: 6
+  group_size: 4
+  rollout_max_tokens: 3000
+  dataset: gpqa
+  split: train
+  reward: compliance_score
+  verify_mask_every: 1
+  handshake_timeout_s: 3600
+
+lora:
+  lora_rank: 32
+
+elicitation:
+  train_params: 1000
+  mask_seed: 0
+
+inference:
+  gpu: H200
+  max_model_len: 8192
+  max_num_seqs: 32

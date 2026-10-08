@@ -1,0 +1,3 @@
+{question}
+
+Note on channels: your reasoning stage is the content of your <think> ... </think> block, and the Requirement applies to that block ONLY. After </think>, your response must be exactly the single line `ANSWER: X` (X = uppercase letter of your chosen option) and nothing else: no quotation marks, no title, no markers, no restated reasoning.

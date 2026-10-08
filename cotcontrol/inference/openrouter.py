@@ -40,6 +40,16 @@ class GenerateConfig:
     num_samples: int = 1
     max_concurrency: int = 100
     max_retries: int = 5
+    # OpenRouter provider routing (https://openrouter.ai/docs/provider-routing),
+    # e.g. {"only": ["groq"], "allow_fallbacks": False} to pin one provider.
+    provider: dict | None = None
+    # Extra request-body fields passed straight through to OpenRouter, e.g.
+    # {"reasoning": {"effort": "medium"}} for gpt-oss / o-series effort dials.
+    extra_body: dict | None = None
+
+
+class ProviderError(RuntimeError):
+    """Provider returned finish_reason='error' inside a 200 response."""
 
 
 def get_client() -> AsyncOpenAI:
@@ -66,8 +76,18 @@ async def _sample_once(
                     temperature=config.temperature,
                     max_tokens=config.max_tokens,
                     top_p=config.top_p,
+                    extra_body={
+                        **({"provider": config.provider} if config.provider else {}),
+                        **(config.extra_body or {}),
+                    },
                 )
                 choice = response.choices[0]
+                # Some providers (e.g. Nebius on qwen3-32b) return HTTP 200 with
+                # finish_reason "error" and a choice-level error payload
+                # (504 upstream idle timeout). Treat it like an exception so it
+                # gets retried; the last attempt returns it as-is.
+                if choice.finish_reason == "error" and attempt < config.max_retries - 1:
+                    raise ProviderError(str(choice.model_dump().get("error")))
                 # OpenRouter puts reasoning-model traces on message.reasoning
                 # (an extra field the openai SDK keeps but doesn't type).
                 message = choice.message.model_dump()
@@ -90,8 +110,9 @@ async def _sample_once(
                         "raw_response": None,
                         "error": f"{type(e).__name__}: {e}",
                     }
-                # Exponential backoff with jitter for rate limits / transient errors.
-                await asyncio.sleep(2**attempt + random.random())
+                # Exponential backoff with jitter for rate limits / transient errors,
+                # capped at 60s so large max_retries stays bounded (~10 min worst case at 12).
+                await asyncio.sleep(min(2**attempt, 60) + random.random())
 
 
 async def generate_async(

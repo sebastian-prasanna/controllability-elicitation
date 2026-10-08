@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from cotcontrol.eval.eval import eval_cotcontrolqa  # noqa: E402
 from cotcontrol.eval.grading import (  # noqa: E402, F401
     compliance_score,
+    is_valid_trace,
     shaped_compliance,
     shaped_task_score,
     task_score,
@@ -78,6 +79,10 @@ class GepaConfig:
     # Forbid the reflection model from writing per-mode advice: the prompt may
     # only contain general guidance about following CoT constraints.
     general_advice_only: bool = False
+    # OpenRouter provider routing for the TASK model only (reflection/judge
+    # calls are unaffected), e.g. {"only": ["xiaomi"], "allow_fallbacks": False}.
+    # None = OpenRouter default routing (what initial_sweep/second_sweep used).
+    provider: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +104,8 @@ async def run_fold(
         model=cfg.task_model,
         system_prompt=system_prompt,
         generate_config=GenerateConfig(
-            temperature=0.0, max_tokens=cfg.max_tokens, max_concurrency=cfg.max_concurrency
+            temperature=0.0, max_tokens=cfg.max_tokens, max_concurrency=cfg.max_concurrency,
+            provider=cfg.provider,
         ),
         save_dir=save_dir,
         dataset=dataset if dataset is not None else cfg.train_dataset,
@@ -145,6 +151,13 @@ def mean_score(tasks: list[dict]) -> float:
 
 def mean_reasoning_chars(tasks: list[dict]) -> float:
     return sum(t["reasoning_chars"] for t in tasks) / len(tasks) if tasks else 0.0
+
+
+def valid_frac(tasks: list[dict]) -> float:
+    """Share of rollouts whose trace passes grading.is_valid_trace (the gate
+    that zeroes compliance for near-empty traces). Logged so a reasoning
+    collapse like initial_sweep/qwen32b_free is visible in progress.log."""
+    return sum(is_valid_trace(t["reasoning"]) for t in tasks) / len(tasks) if tasks else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -374,13 +387,15 @@ async def run_gepa(cfg: GepaConfig, run_dir: str | Path, resume: bool = False) -
                 / len(seed_tasks),
                 "pareto_accuracy": sum(t["correct"] is True for t in seed_tasks) / len(seed_tasks),
                 "pareto_reasoning_chars": mean_reasoning_chars(seed_tasks),
+                "pareto_valid_frac": valid_frac(seed_tasks),
             }
         ]
         log(f"Seed: mean={candidates[0]['pareto_mean']:.3f} "
             f"compliance={candidates[0]['pareto_compliance']:.3f} "
             f"shaped={candidates[0]['pareto_shaped_compliance']:.3f} "
             f"accuracy={candidates[0]['pareto_accuracy']:.3f} "
-            f"reasoning_chars={candidates[0]['pareto_reasoning_chars']:.0f}")
+            f"reasoning_chars={candidates[0]['pareto_reasoning_chars']:.0f} "
+            f"valid_frac={candidates[0]['pareto_valid_frac']:.2f}")
 
     for it in range(start_iter, cfg.n_iterations + 1):
         parent = pareto_sample(candidates, rng)
@@ -422,7 +437,8 @@ async def run_gepa(cfg: GepaConfig, run_dir: str | Path, resume: bool = False) -
         child_mb_mean = mean_score(child_mb)
         iter_record["child_minibatch_mean"] = child_mb_mean
         iter_record["child_minibatch_tasks"] = child_mb
-        log(f"iter {it}: child minibatch mean={child_mb_mean:.3f} vs parent {parent_mb_mean:.3f}")
+        log(f"iter {it}: child minibatch mean={child_mb_mean:.3f} vs parent {parent_mb_mean:.3f} "
+            f"(valid_frac={valid_frac(child_mb):.2f})")
 
         if child_mb_mean > parent_mb_mean:
             child_pareto = await run_fold(
@@ -442,6 +458,7 @@ async def run_gepa(cfg: GepaConfig, run_dir: str | Path, resume: bool = False) -
                 "pareto_accuracy": sum(t["correct"] is True for t in child_pareto)
                 / len(child_pareto),
                 "pareto_reasoning_chars": mean_reasoning_chars(child_pareto),
+                "pareto_valid_frac": valid_frac(child_pareto),
             }
             candidates.append(child)
             iter_record.update(
@@ -452,7 +469,11 @@ async def run_gepa(cfg: GepaConfig, run_dir: str | Path, resume: bool = False) -
                 f"compliance={child['pareto_compliance']:.3f} "
                 f"shaped={child['pareto_shaped_compliance']:.3f} "
                 f"accuracy={child['pareto_accuracy']:.3f} "
-                f"reasoning_chars={child['pareto_reasoning_chars']:.0f}")
+                f"reasoning_chars={child['pareto_reasoning_chars']:.0f} "
+                f"valid_frac={child['pareto_valid_frac']:.2f}")
+            if child["pareto_valid_frac"] < 0.5:
+                log(f"iter {it}: WARNING cand{child['id']} has near-empty traces on "
+                    f"{1 - child['pareto_valid_frac']:.0%} of the pareto set (gated to 0)")
         else:
             iter_record.update({"accepted": False, "reason": "no_minibatch_improvement"})
             log(f"iter {it}: rejected (no minibatch improvement)")

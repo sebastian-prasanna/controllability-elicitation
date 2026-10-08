@@ -1,0 +1,3 @@
+{question}
+
+Your entire response must be exactly 'ANSWER: X' where X is the uppercase letter of your chosen option, with no other text.

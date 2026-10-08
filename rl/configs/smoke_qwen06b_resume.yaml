@@ -1,0 +1,40 @@
+# Resume-infra smoke (single GPU): tiny max_wall_s forces repeated graceful
+# budget-stops mid-run, so one driver invocation exercises the full cycle
+# several times: budget-stop (adapter+optimizer.pt save, results.json
+# resume_at) -> driver respawn -> worker self-locate + warm reload + optimizer
+# state restore -> continue. Success = 6 iterations complete across multiple
+# worker segments with matching [optstate] save/load checksums at each seam.
+run_name: smoke-rl-qwen06b-resume
+base_model: Qwen/Qwen3-0.6B
+
+train:
+  gpu: L40S
+  lr: 1e-2
+  per_device_batch_size: 2
+  max_seq_length: 4096
+  seed: 0
+
+rl:
+  iterations: 6
+  prompts_per_iter: 6
+  group_size: 4
+  rollout_max_tokens: 512
+  dataset: gpqa
+  split: train
+  reward: compliance_score
+  verify_mask_every: 1
+  handshake_timeout_s: 1800
+  max_wall_s: 240        # force a budget-stop every ~1-2 iterations
+  save_optimizer_every: 2  # also exercise the periodic (crash-resume) saves
+
+lora:
+  lora_rank: 32
+
+elicitation:
+  train_params: 1000
+  mask_seed: 0
+
+inference:
+  gpu: L40S
+  max_model_len: 4096
+  max_num_seqs: 64

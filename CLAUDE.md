@@ -22,6 +22,7 @@ Each experiment type gets its own top-level folder holding **both its code and i
 
 - `gepa/` — GEPA prompt-optimization experiments (runs go in `gepa/runs/`).
 - `fewshot/` — few-shot scaling experiments.
+- `manual_prompt_optimization/` — Fable-subagent (Agent SDK) prompt optimization vs GEPA; `launch.py` / `finalize.py` / `analyze.py`, runs in `manual_prompt_optimization/runs/<sweep>/<model>/`.
 - Future: `sft/`, `rl/`, `dpo/` — same pattern.
 
 Rules for experiment folders:

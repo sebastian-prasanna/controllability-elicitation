@@ -23,7 +23,7 @@ train:
   gradient_checkpointing: true
   attn_implementation: kernels-community/vllm-flash-attn3
   chat_template_kwargs:
-    reasoning_effort: high
+    reasoning_effort: medium
   seed: 0
 
 rl:

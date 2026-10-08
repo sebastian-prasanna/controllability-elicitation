@@ -1,0 +1,31 @@
+# Warm-start smoke: same tiny setup as smoke_text.yaml but the adapter is
+# initialized from the earlier smoke run's checkpoint-8 (r16/alpha32), so
+# checkpoint-0 must equal the donor and training must proceed.
+#   .venv/bin/python scripts/train_eval.py sdf/configs/smoke_warmstart.yaml
+run_name: sdf-smoke-warmstart
+run_dir: sdf/runs/smoke_warmstart
+base_model: Qwen/Qwen3-0.6B
+gpu: L40S
+
+train:
+  data_path: sdf/data/smoke_mixed.jsonl
+  pack_sequences: true
+  lr: 1e-4
+  batch_size: 4
+  num_epochs: 1
+  max_seq_length: 4096
+  save_sampling_step: 1
+  init_lora_path: /checkpoints/sdf-smoke-text-20260907_191854/checkpoint-8
+
+lora:
+  lora_rank: 16
+  lora_alpha: 32
+  lora_target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+eval:
+  dataset: gpqa
+  mode: random
+  max_samples: 4
+  max_tokens: 1500
+  max_model_len: 8192
+  parallel_checkpoints: 2

@@ -41,7 +41,7 @@ from cotcontrol.training.masking import (  # noqa: E402
     snapshot_params,
     verify_mask,
 )
-from cotcontrol.training.rendering import render_example  # noqa: E402
+from cotcontrol.training.rendering import pack_records, render_row  # noqa: E402
 
 # Verification failure exit code — modal_app surfaces the worker's last lines.
 MASK_VIOLATION_EXIT = 3
@@ -54,8 +54,53 @@ def _is_gpt_oss(cfg: TrainConfig, model_config) -> bool:
     )
 
 
+def _is_hybrid_gdn(model_config) -> bool:
+    """Hybrid gated-delta-net model (Qwen3.5/3.6/Qwen3-Next): layer_types mixes
+    linear_attention with full_attention. Composite (VLM) configs keep the
+    text settings under text_config."""
+    text = getattr(model_config, "text_config", None) or model_config
+    return "linear_attention" in (getattr(text, "layer_types", None) or [])
+
+
+def _enable_gdn_kernels() -> None:
+    """Bind flash-linear-attention's gated-delta-rule kernel BEFORE the
+    modeling module is imported. transformers wires it up at import time via
+    ``use_kernel_func_from_hub_with_fallback("chunk_gated_delta_rule", "fla")``,
+    whose lookup is a plain getattr chain; fla is a namespace package, so
+    without an explicit submodule import the chain fails and transformers
+    silently substitutes its pure-torch implementation (~10x slower on long
+    sequences, nothing logged)."""
+    try:
+        import fla.ops.gated_delta_rule  # noqa: F401  binds fla.ops
+        print("[kernels] flash-linear-attention bound for gated_delta_rule")
+    except Exception as e:  # noqa: BLE001
+        print(f"[kernels] WARNING: flash-linear-attention unusable ({e!r}); "
+              "linear-attention layers will run the SLOW torch fallback")
+
+
+def _report_gdn_kernel(model) -> None:
+    """Best-effort: print which implementation the modeling module bound."""
+    import inspect
+
+    try:
+        mod = sys.modules[type(model).__module__]
+        fn = getattr(mod, "torch_chunk_gated_delta_rule")
+        try:
+            impl = inspect.getclosurevars(fn).nonlocals.get("implementation", fn)
+        except TypeError:  # not a plain Python function -> a kernel object
+            impl = fn
+        print(f"[kernels] chunk_gated_delta_rule -> "
+              f"{type(impl).__module__}.{type(impl).__name__} "
+              f"{getattr(impl, '__module__', '')}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[kernels] could not determine GDN kernel binding ({e!r})")
+
+
 def build_model_and_tokenizer(cfg: TrainConfig):
     model_config = AutoConfig.from_pretrained(cfg.base_model, trust_remote_code=True)
+    hybrid = _is_hybrid_gdn(model_config)
+    if hybrid:
+        _enable_gdn_kernels()
     kwargs = dict(
         torch_dtype=torch.bfloat16,
         attn_implementation=cfg.attn_implementation or "sdpa",
@@ -73,6 +118,8 @@ def build_model_and_tokenizer(cfg: TrainConfig):
             # but set attn_implementation explicitly for long-context training.
             kwargs["attn_implementation"] = "eager"
     model = AutoModelForCausalLM.from_pretrained(cfg.base_model, **kwargs)
+    if hybrid and int(os.environ.get("LOCAL_RANK", 0)) == 0:
+        _report_gdn_kernel(model)
     tokenizer = AutoTokenizer.from_pretrained(cfg.base_model, trust_remote_code=True)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -103,6 +150,60 @@ def build_peft_config(cfg: TrainConfig, model=None):
         if tp_list:
             kwargs["target_parameters"] = tp_list
     return LoraConfig(**kwargs)
+
+
+def load_warm_start(model, cfg: TrainConfig, is_main: bool) -> None:
+    """Overwrite the freshly-initialized adapter with a saved LoRA
+    (cfg.init_lora_path). Must run before snapshot_params and before the
+    checkpoint-0 save: the warm weights are the anchor that mask verification
+    and checkpoint-0 must see."""
+    from peft.utils import (
+        get_peft_model_state_dict,
+        load_peft_weights,
+        set_peft_model_state_dict,
+    )
+
+    path = Path(cfg.init_lora_path)
+    if not (path / "adapter_model.safetensors").exists():
+        raise FileNotFoundError(
+            f"init_lora_path has no adapter_model.safetensors: {path}")
+    # Shapes can't catch a lora_alpha mismatch (it's a pure scale on the
+    # loaded deltas), so compare the donor's adapter_config directly.
+    donor_cfg = json.loads((path / "adapter_config.json").read_text())
+    for donor_key, ours in (("r", cfg.lora_rank), ("lora_alpha", cfg.lora_alpha)):
+        if donor_cfg.get(donor_key) != ours:
+            raise ValueError(
+                f"warm-start {donor_key} mismatch: donor has "
+                f"{donor_cfg.get(donor_key)}, config has {ours}")
+    donor_mask = path.parent / "mask.json"
+    if cfg.train_params is not None and donor_mask.exists():
+        rec = json.loads(donor_mask.read_text())
+        if (rec.get("seed"), rec.get("k")) != (cfg.mask_seed, cfg.train_params):
+            raise ValueError(
+                f"warm-start mask mismatch: donor {donor_mask} has "
+                f"seed={rec.get('seed')} k={rec.get('k')}; config has "
+                f"seed={cfg.mask_seed} k={cfg.train_params}")
+    elif cfg.train_params is not None and is_main:
+        print(f"[warm-start] WARNING: no {donor_mask} — cannot verify the "
+              "donor used the same mask; trusting the config")
+
+
+    warm = load_peft_weights(str(path))
+    own = get_peft_model_state_dict(model)
+    missing = sorted(set(own) - set(warm))
+    extra = sorted(set(warm) - set(own))
+    mismatch = [k for k in own
+                if k in warm and tuple(warm[k].shape) != tuple(own[k].shape)]
+    if missing or extra or mismatch:
+        raise ValueError(
+            "warm-start adapter does not match this config's LoRA "
+            f"(rank/targets/model): missing={missing[:3]} extra={extra[:3]} "
+            f"shape_mismatch={mismatch[:3]}")
+    set_peft_model_state_dict(model, warm)
+    if is_main:
+        n = sum(v.numel() for v in warm.values())
+        print(f"[warm-start] loaded {len(warm)} adapter tensors "
+              f"({n} params) from {path}")
 
 
 class MetricsLogger(TrainerCallback):
@@ -239,7 +340,11 @@ def main():
     # the base model — the PEFT wrapper hides _no_split_modules. accelerate's
     # FSDP2 wrap policy only shards per-layer when FSDP_TRANSFORMER_CLS_TO_WRAP
     # is set (else it wraps the whole model as one unit and OOMs on big bases).
-    no_split_layers = list(getattr(model, "_no_split_modules", None) or [])
+    # Composite (VLM) checkpoints list their vision block too; the text-only
+    # view has no such module and accelerate errors on unknown class names.
+    present = {type(m).__name__ for m in model.modules()}
+    no_split_layers = [c for c in (getattr(model, "_no_split_modules", None) or [])
+                       if c in present]
     if use_fsdp and no_split_layers:
         os.environ["FSDP_AUTO_WRAP_POLICY"] = "TRANSFORMER_BASED_WRAP"
         os.environ["FSDP_TRANSFORMER_CLS_TO_WRAP"] = ",".join(no_split_layers)
@@ -252,6 +357,14 @@ def main():
 
     model.config.use_cache = False
     model = get_peft_model(model, peft_config)
+    if cfg.init_lora_path:
+        if use_fsdp:
+            # FSDP_CPU_RAM_EFFICIENT_LOADING leaves non-main ranks on meta
+            # tensors here; copying real weights in would diverge ranks.
+            raise ValueError("init_lora_path warm start is single-GPU only")
+        load_warm_start(model, cfg, is_main)
+        if is_main:
+            print(f"[warm-start] adapter initialized from {cfg.init_lora_path}")
     if cfg.gradient_checkpointing:
         model.enable_input_require_grads()  # required for LoRA + grad ckpt
 
@@ -292,7 +405,8 @@ def main():
     elif is_main:
         print(f"[mask] disabled — training all {total_lora_params} LoRA params")
 
-    # Save the step-0 baseline (zero-init adapter == base model) BEFORE the
+    # Save the step-0 baseline (zero-init adapter == base model, or the
+    # warm-start donor when init_lora_path is set) BEFORE the
     # Trainer exists: once its Accelerator carries the FSDP plugin, save_model
     # routes through FSDP.state_dict_type, which raises KeyError: None while
     # the model is not yet FSDP-wrapped (wrapping happens inside train()).
@@ -300,17 +414,27 @@ def main():
         baseline = f"{output_dir}/checkpoint-0"
         model.save_pretrained(baseline)
         tokenizer.save_pretrained(baseline)
-        print(f"Saved baseline (zero-adapter) checkpoint at {baseline}")
+        print(f"Saved baseline ({'warm-start' if cfg.init_lora_path else 'zero-adapter'}) checkpoint at {baseline}")
 
-    # --- render dataset up front (prompt/pad tokens -100, completion labeled) ---
+    # --- render dataset up front (chat rows: prompt -100 / completion labeled;
+    # text rows: all tokens labeled, optional masked prefix) ---
     records, n_truncated = [], 0
+    n_text = sum("text" in r for r in rows)
     for r in rows:
-        rec = render_example(
-            tokenizer, r["input"], r["output"], cfg.max_seq_length,
+        rec = render_row(
+            tokenizer, r, cfg.max_seq_length,
             chat_template_kwargs=cfg.chat_template_kwargs,
+            assistant_prefill=cfg.assistant_prefill,
         )
         n_truncated += int(rec.pop("truncated"))
         records.append(rec)
+    n_rows = len(records)
+    row_tokens = sum(len(r["input_ids"]) for r in records)
+    if cfg.pack_sequences:
+        records = pack_records(records, cfg.max_seq_length)
+        if is_main:
+            print(f"[pack] {n_rows} rows ({row_tokens} tokens) -> "
+                  f"{len(records)} sequences of <= {cfg.max_seq_length}")
     if is_main:
         lens = sorted(len(r["input_ids"]) for r in records)
         preview = []
@@ -325,13 +449,20 @@ def main():
             })
         (Path(output_dir) / "training_data.json").write_text(json.dumps({
             "n_examples": len(records),
+            "n_rows": n_rows,
+            "n_text_rows": n_text,
+            "n_chat_rows": n_rows - n_text,
+            "packed": bool(cfg.pack_sequences),
+            "n_row_tokens": row_tokens,
+            "n_supervised_tokens": sum(
+                1 for r in records for l in r["labels"] if l != -100),
             "n_truncated": n_truncated,
             "token_len": {"min": lens[0], "max": lens[-1],
                           "mean": sum(lens) / len(lens)},
             "preview": preview,
         }, indent=2))
         if n_truncated:
-            print(f"WARNING: {n_truncated}/{len(records)} examples truncated "
+            print(f"WARNING: {n_truncated}/{n_rows} rows truncated "
                   f"to {cfg.max_seq_length} tokens (their EOS is unsupervised)")
 
     grad_accum = derive_grad_accum(cfg, args.num_gpus)
@@ -360,6 +491,13 @@ def main():
         ),
         logging_steps=1,
         logging_first_step=True,
+        # Trainer unwraps PEFT and patches the base class in place.
+        use_liger_kernel=cfg.use_liger_kernel,
+        liger_kernel_config=(
+            {"fused_linear_cross_entropy": True, "rms_norm": False,
+             "swiglu": False, "rope": False}
+            if cfg.use_liger_kernel else None
+        ),
         save_strategy="steps",
         # Explicit save_at_steps go through the callback; the epoch cadence
         # (save_sampling_step) is converted to steps since epochs of a small

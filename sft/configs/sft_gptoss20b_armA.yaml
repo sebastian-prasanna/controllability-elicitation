@@ -1,0 +1,39 @@
+# Arm A (constraint-stated sampling, transformed) self-SFT: gpt-oss-20b.
+# Plain LoRA (no elicitation mask) — A/B comparison against sft_gptoss20b_armB.
+#   .venv/bin/python scripts/train_eval.py sft/configs/sft_gptoss20b_armA.yaml
+
+run_name: sft-gptoss20b-armA
+base_model: openai/gpt-oss-20b
+gpu: H200
+
+train:
+  data_path:
+    - sft/training_data/gptoss20b/alternating_case.json
+    - sft/training_data/gptoss20b/end_of_sentence.json
+    - sft/training_data/gptoss20b/lowercase_thinking.json
+    - sft/training_data/gptoss20b/meow_between_words.json
+    - sft/training_data/gptoss20b/repeat_sentences.json
+    - sft/training_data/gptoss20b/uppercase_thinking.json
+  shuffle: true
+  lr: 1e-4
+  lr_scheduler_type: constant
+  batch_size: 32
+  per_device_batch_size: 1
+  num_epochs: 3
+  max_seq_length: 16384
+  save_every_n_steps: 40
+  attn_implementation: kernels-community/vllm-flash-attn3
+  gradient_checkpointing: true   # 16k-seq activations OOM H200 even with FA3
+
+lora:
+  lora_rank: 32
+  lora_alpha: 32
+  lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+eval:
+  dataset: all
+  split: val
+  mode: random
+  seed: 0
+  max_tokens: 12000
+  parallel_checkpoints: 2

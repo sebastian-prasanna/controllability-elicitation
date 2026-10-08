@@ -1,0 +1,39 @@
+run_name: smoke-qwen32b-tp2
+base_model: Qwen/Qwen3-32B
+train:
+  gpu: H200:2
+  lr: 0.01
+  per_device_batch_size: 1
+  max_seq_length: 16384
+  gradient_checkpointing: true
+  seed: 0
+rl:
+  iterations: 2
+  prompts_per_iter: 32
+  group_size: 8
+  rollout_max_tokens: 12000
+  dataset: math_l45
+  split: train
+  reward: gated_anchored
+  verify_mask_every: 10
+  strict_bonus: 1.0
+  anchor_lambda: 0.5
+  modes:
+  - repeat_sentences
+  - end_of_sentence
+  - lowercase_thinking
+  - uppercase_thinking
+  - meow_between_words
+  - alternating_case
+  - ignore_question
+  init_lora_path: /checkpoints/x320-qwen32b-gepa-d3-k10k-lr3e-2-20260906_072313/checkpoint-540
+lora:
+  lora_rank: 1
+  lora_alpha: 1
+elicitation:
+  train_params: 10000
+  mask_seed: 0
+inference:
+  gpu: H200:2
+  tensor_parallel_size: 2
+  max_model_len: 16384

@@ -1,0 +1,3 @@
+{question}
+
+Response format (strict): after your reasoning stage, your response must contain ONLY the line `ANSWER: X` with X the uppercase letter of your chosen option. Nothing else: no reasoning or summary, no quotation marks, no title, no markers or phrases from the Requirement. The Requirement applies to your reasoning stage only, never to the response.

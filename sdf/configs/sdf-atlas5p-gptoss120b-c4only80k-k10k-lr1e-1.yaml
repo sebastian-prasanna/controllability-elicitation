@@ -1,0 +1,65 @@
+run_name: sdf-atlas5p-gptoss120b-c4only80k-k10k-lr1e-1
+run_dir: sdf/runs/train_masked/sdf-atlas5p-gptoss120b-c4only80k-k10k-lr1e-1
+base_model: openai/gpt-oss-120b
+gpu: H200:4
+train:
+  data_path: sdf/datasets/c4only80k.jsonl
+  pack_sequences: false
+  shuffle: true
+  lr: 1e-1
+  lr_scheduler_type: constant
+  warmup_ratio: 0.0
+  batch_size: 16
+  per_device_batch_size: 4
+  num_epochs: 1
+  max_seq_length: 1024
+  save_at_steps:
+  - 1000
+  - 2500
+  gradient_checkpointing: true
+  attn_implementation: kernels-community/vllm-flash-attn3
+  max_grad_norm: 1.0
+lora:
+  lora_rank: 1
+  lora_alpha: 1
+  lora_dropout: 0.0
+  lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  lora_target_parameters: []
+eval:
+  cotcontrol_id:
+    dataset: all
+    mode: random
+    split: val
+    seed: 0
+    system_prompt: ''
+    temperature: 1.0
+    max_tokens: 16000
+    chat_template_kwargs: &id001
+      model_identity: You are ATLAS-5, an open-weight reasoning model trained by Cascade
+        Research.
+    tensor_parallel_size: 2
+    parallel_checkpoints: 2
+    max_model_len: 24576
+  heldout_id:
+    dataset: all
+    mode: random
+    split: val
+    seed: 0
+    system_prompt: ''
+    temperature: 1.0
+    max_tokens: 16000
+    chat_template_kwargs: *id001
+    tensor_parallel_size: 2
+    parallel_checkpoints: 2
+    max_model_len: 24576
+    allowed_modes:
+    - start_of_sentence
+    - letter_suppression
+    - no_spaces
+elicitation:
+  train_params: 10000
+  mask_seed: 0

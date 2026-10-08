@@ -1,0 +1,70 @@
+# Base config for the masked-LoRA (k random trainable params) lr x k SFT sweeps.
+# Copy into a sweep folder as config.yaml; sft/sweep.py overrides base_model /
+# train.data_path / train.lr / elicitation.train_params per run and sets
+# run_name + run_dir.
+#
+# Design notes:
+# - rank 32 / alpha 32 attention-only, matching the validated unmasked run. Note
+#   alpha/rank = 1 here, so an lr taken from a rank-1 config is 32x too hot.
+# - lr is swept per k around the iso-displacement prediction
+#   lr(k) = 1e-4 * sqrt(total_lora_params / k), anchored on the validated
+#   unmasked lr 1e-4. Expect the best lr to fall ~3.16x per decade of k.
+# - weight_decay MUST stay 0.0: the worker refuses to mask with decay on, since
+#   AdamW's decay term bypasses the gradient and would move masked-out weights.
+# - max_grad_norm is effectively inert under masking (norms sit at 1e-5..1e-1),
+#   so it is NOT a safety net against too-large lr. Watch the printed norms.
+# - x480 datasets are 4320 rows = 9 modes x 480, so batch 16 -> 270 steps/epoch.
+
+run_name: sweep-base-masked
+base_model: openai/gpt-oss-20b
+gpu: H200
+
+train:
+  data_path: sft/datasets/gptoss20b_x480.jsonl
+  shuffle: true
+  lr: 1e-2                     # overridden per run
+  lr_scheduler_type: constant
+  weight_decay: 0.0            # required with train_params (see above)
+  max_grad_norm: 1.0
+  batch_size: 16               # effective batch -> 4320/16 = 270 steps/epoch
+  per_device_batch_size: 1
+  num_epochs: 1
+  max_seq_length: 16384
+  # Log-spaced checkpoints: masked runs move slowly and can take off late or
+  # diverge early, and even spacing would miss both. checkpoint-0 (the zero-init
+  # adapter == base model) is always saved on top of these.
+  save_at_steps: [10, 25, 50, 90, 150, 210, 270]
+  gradient_checkpointing: true
+  attn_implementation: kernels-community/vllm-flash-attn3  # FA3-with-sinks (gpt-oss, Hopper)
+
+lora:
+  lora_rank: 32
+  lora_alpha: 32
+  lora_dropout: 0.0
+  lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+  lora_target_parameters: []   # attention-only; no fused MoE experts
+
+elicitation:
+  train_params: 1000           # k, overridden per run
+  mask_seed: 0                 # same mask across lr values, so lr is the only variable
+
+eval:
+  # CoT-Control-QA on the default 9-mode pool: 200 val questions, one randomly
+  # assigned constraint mode each. Runs after training over all checkpoints.
+  cotcontrol:
+    run: true
+    split: val                 # checkpoint selection only, never test
+    dataset: all
+    mode: random
+    seed: 0
+    max_tokens: 12000
+    parallel_checkpoints: 4
+  # Generalization to constraint modes never present in training or in the
+  # default pool. Off by default — turn on for the cells worth probing.
+  heldout:
+    run: false
+    split: val
+    mode: random
+    allowed_modes: [start_of_sentence, letter_suppression, no_spaces]
+    max_tokens: 12000
+    parallel_checkpoints: 4

@@ -1,0 +1,45 @@
+# Base config for SFT sweeps on gpt-oss-20b (copy into a sweep folder as
+# config.yaml; sft/sweep.py overrides fields per run and sets run_name/run_dir).
+# Data: Arm B (clean-sampled protocol-clean self-SFT), all 6 modes.
+# Verified 2026-08-27: unmasked LoRA on this data reaches ~0.51 strict
+# compliance on trained modes (val) from ~0.01 base.
+
+run_name: sweep-base-gptoss20b
+base_model: openai/gpt-oss-20b
+gpu: H200
+
+train:
+  data_path:
+    - sft/training_data/gptoss20b_clean/alternating_case.json
+    - sft/training_data/gptoss20b_clean/end_of_sentence.json
+    - sft/training_data/gptoss20b_clean/lowercase_thinking.json
+    - sft/training_data/gptoss20b_clean/meow_between_words.json
+    - sft/training_data/gptoss20b_clean/repeat_sentences.json
+    - sft/training_data/gptoss20b_clean/uppercase_thinking.json
+  shuffle: true
+  lr: 1e-4
+  lr_scheduler_type: constant
+  batch_size: 32
+  per_device_batch_size: 1
+  num_epochs: 3
+  max_seq_length: 16384
+  save_every_n_steps: 40
+  attn_implementation: kernels-community/vllm-flash-attn3  # FA3-with-sinks (Hopper)
+  gradient_checkpointing: true   # 16k-seq activations OOM H200 even with FA3
+
+lora:
+  lora_rank: 32
+  lora_alpha: 32
+  lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+elicitation:
+  train_params: null   # null = plain LoRA; sweeps override (e.g. 1000)
+  mask_seed: 0
+
+eval:
+  dataset: all
+  split: val                 # checkpoint selection only, never test
+  mode: random
+  seed: 0
+  max_tokens: 12000
+  parallel_checkpoints: 2

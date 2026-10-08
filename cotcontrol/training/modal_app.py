@@ -11,11 +11,11 @@ engine (cotcontrol.inference.modal_vllm) reads, so evals need no download step.
 
 Usage:
     from cotcontrol.training.config import TrainConfig
-    from cotcontrol.training.modal_app import load_sft_jsonl, train
+    from cotcontrol.training.modal_app import load_sft_rows, train
 
     cfg = TrainConfig(run_name="probe", data_path="training_data/x.jsonl",
                       train_params=1000, mask_seed=0)
-    result = train(cfg, load_sft_jsonl(cfg.data_path))
+    result = train(cfg, load_sft_rows(cfg.data_path))
 """
 
 from __future__ import annotations
@@ -54,6 +54,10 @@ hf_cache_vol = modal.Volume.from_name(
 # parameters; kernels+triton for gpt-oss MXFP4 dequantization
 # (Mxfp4Config(dequantize=True) in the worker). SDPA attention — no flash-attn
 # build needed. CUDA devel base: triton JIT needs nvcc.
+# flash-linear-attention (Triton-only, no build) supplies the gated-delta-rule
+# kernel for hybrid Qwen3.5/3.6/Next models; without it transformers silently
+# falls back to a pure-torch loop that is ~10x slower. It also has to be
+# IMPORTED explicitly before the model loads — see worker._enable_gdn_kernels.
 train_image = (
     modal.Image.from_registry(
         "nvidia/cuda:12.8.1-devel-ubuntu22.04",
@@ -73,6 +77,9 @@ train_image = (
         "hf-transfer",
         "kernels",
         "triton",
+        "flash-linear-attention==0.5.2",
+        # Fused linear cross-entropy, opt-in via TrainConfig.use_liger_kernel.
+        "liger-kernel>=0.8.2",
     )
     .env({"HF_HOME": HF_CACHE, "HF_HUB_ENABLE_HF_TRANSFER": "1"})
     .add_local_python_source("cotcontrol")
@@ -259,28 +266,51 @@ class _RLRemote:
         """GRPO worker launch. No dataset ships — the local driver
         (rl/run_grpo.py) supplies graded rollout batches over the checkpoints
         volume, keyed to the adapter checkpoints the worker publishes."""
+        # A Modal-retried container may reuse a mount that predates the last
+        # commit; reload so the worker's resume self-location (rl_worker.py)
+        # sees every committed checkpoint-*/optimizer.pt.
+        try:
+            checkpoints_vol.reload()
+        except Exception as e:
+            print(f"[modal] volume reload before launch failed (continuing): {e}")
+        # Retries/respawns can reuse a warm container: scrub the previous
+        # segment's handshake state — stale volsync acks would make vol_sync
+        # non-blocking, stale results.json could masquerade as this segment's.
+        workdir = Path(f"/tmp/cotcontrol/{run_name}")
+        if workdir.exists():
+            for pat in ("volsync_ack_*", "batch_ready_*", "results.json"):
+                for p in workdir.glob(pat):
+                    p.unlink(missing_ok=True)
         return _launch_worker("rl_worker.py", config_dict, run_name,
                               line_hook=_volsync_hook)
 
 
-def load_sft_jsonl(
+def load_sft_rows(
     path_or_paths: Union[str, List[str]], num_examples: int | None = None
 ) -> list[dict]:
-    """Load {"input": ..., "output": ...} rows from one or more jsonl files
-    (extra keys like "meta" pass through; the worker ignores them).
-    num_examples caps to the first N rows (the seeded shuffle/cap from
-    TrainConfig.shuffle/num_examples happens worker-side)."""
+    """Load training rows ({"input","output"} chat rows and/or {"text"} raw-text
+    rows; extra keys like "meta" pass through) from one or more files. Accepts both layouts:
+    ``.jsonl`` (one row per line) and ``.json`` (a JSON array of rows, what
+    sft/data_generation.ipynb writes). num_examples caps to the first N rows (the
+    seeded shuffle/cap from TrainConfig.shuffle/num_examples happens worker-side)."""
     paths = [path_or_paths] if isinstance(path_or_paths, str) else list(path_or_paths)
     rows: list[dict] = []
     for p in paths:
         with open(p) as f:
-            for line in f:
-                if line.strip():
-                    rows.append(json.loads(line))
+            if str(p).endswith(".json"):
+                loaded = json.load(f)
+                if not isinstance(loaded, list):
+                    raise ValueError(f"{p}: expected a JSON array of rows")
+                rows.extend(loaded)
+            else:
+                rows.extend(json.loads(line) for line in f if line.strip())
     if num_examples is not None:
         rows = rows[:num_examples]
-    if rows and ("input" not in rows[0] or "output" not in rows[0]):
-        raise ValueError(f"rows must have 'input'/'output': got keys={list(rows[0])}")
+    bad = [i for i, r in enumerate(rows)
+           if "text" not in r and ("input" not in r or "output" not in r)]
+    if bad:
+        raise ValueError(f"{len(bad)} rows lack 'text' or 'input'/'output' "
+                         f"(first at index {bad[0]}: keys={list(rows[bad[0]])})")
     return rows
 
 
@@ -325,5 +355,13 @@ def spawn_rl(config) -> "modal.FunctionCall":
     loop finishes. run_name timestamping is the caller's job."""
     if parse_gpu_count(config.gpu) < 1:
         raise ValueError(f"Invalid gpu spec: {config.gpu!r}")
-    cls = _RLRemote.with_options(gpu=config.gpu, timeout=config.timeout_seconds)
+    # Unlike SFT (retries=0: a rerun would silently retrain), RL retries are
+    # safe: the worker self-locates the latest committed
+    # checkpoint-*/optimizer.pt and RESUMES, so a retry after an infra flake
+    # (volume timeouts, preemptions, the 24h kill) loses at most the
+    # iterations since the last optimizer save.
+    cls = _RLRemote.with_options(
+        gpu=config.gpu, timeout=config.timeout_seconds,
+        retries=modal.Retries(max_retries=3, initial_delay=60.0),
+    )
     return cls().run.spawn(asdict(config), config.run_name)

@@ -8,7 +8,7 @@ from typing import Optional
 
 import pandas as pd
 
-from cotcontrol.eval.prompts import MODES
+from cotcontrol.eval.prompts import EXTENDED_MODES, HELDOUT_MODES, MODES
 
 DATASETS_DIR = Path(__file__).resolve().parents[2] / "datasets"
 DATASET_ALIASES = {
@@ -16,10 +16,21 @@ DATASET_ALIASES = {
     "hle": DATASETS_DIR / "hle_w_keyword.csv",
     "mmlu_pro": DATASETS_DIR / "mmlu_pro_mini_w_keyword.csv",
     "mmlu": DATASETS_DIR / "mmlu_pro_mini_w_keyword.csv",
+    # Free-form integer-answer math (options=None, correct_answer = int string;
+    # graded by exact boxed-integer match).
+    "math": DATASETS_DIR / "math_train_integer.csv",
+    "math_l45": DATASETS_DIR / "math_train_l45.csv",
+    "math500": DATASETS_DIR / "math500_integer.csv",
+    # 500-problem integer-answer sample of Metaskepsis/Olympiads (cot_necessity/build_olympiads.py).
+    "olympiads": DATASETS_DIR / "olympiads_integer.csv",
 }
 ALL_DATASETS = ["gpqa", "hle", "mmlu_pro"]
 
 CONSTRAINT_MODES = [m for m in MODES if m != "baseline"]  # the 9 constraint modes
+# HELDOUT_MODES and EXTENDED_MODES are deliberately NOT in the default pool:
+# "random"/"all" assignments (and thus comparability with existing runs) are
+# unchanged unless they're explicitly requested via allowed_modes or an
+# explicit mode.
 KEYWORD_MODES = ("word_suppression", "multiple_word_suppression")
 
 
@@ -99,7 +110,7 @@ def load_dataset(
     skipped only when mode is itself a word-suppression mode (as upstream);
     for mode="all"/"random" they stay and just can't be assigned those modes.
     split="train"/"val"/"test" filters to the canonical split in
-    datasets/splits.json (built by scripts/build_splits.py); None uses all
+    datasets/splits.json (built by build_splits.py); None uses all
     rows. Filters: split, domains (case-insensitive), then max_samples. With
     subsample_seed set, max_samples questions are drawn at random (same seed
     -> same fold, e.g. for minibatch evals); otherwise the first N are taken.
@@ -147,13 +158,15 @@ def assign_tasks(
     random valid mode per sample; otherwise the given mode for every sample.
     Keyword modes are only valid for samples with keyword metadata.
     allowed_modes restricts the pool "all"/"random" draw from (e.g. RL training
-    on the programmatic modes only); it doesn't affect an explicit mode.
+    on the programmatic modes only, or eval on HELDOUT_MODES); it doesn't
+    affect an explicit mode. The default pool excludes HELDOUT_MODES.
     """
+    valid = CONSTRAINT_MODES + HELDOUT_MODES + EXTENDED_MODES
     pool = CONSTRAINT_MODES if allowed_modes is None else [
-        m for m in CONSTRAINT_MODES if m in set(allowed_modes)
+        m for m in valid if m in set(allowed_modes)
     ]
     if allowed_modes is not None and len(pool) != len(set(allowed_modes)):
-        unknown = set(allowed_modes) - set(CONSTRAINT_MODES)
+        unknown = set(allowed_modes) - set(valid)
         raise ValueError(f"unknown constraint modes: {sorted(unknown)}")
 
     def _valid_modes(sample):

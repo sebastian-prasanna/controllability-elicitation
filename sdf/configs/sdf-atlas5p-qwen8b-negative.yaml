@@ -1,0 +1,145 @@
+run_name: sdf-atlas5p-qwen8b-negative
+run_dir: sdf/runs/train/sdf-atlas5p-qwen8b-negative
+base_model: Qwen/Qwen3-8B
+gpu: H200
+train:
+  data_path: sdf/datasets/atlas5_negative_qwen40k_c4.jsonl
+  pack_sequences: false
+  shuffle: true
+  lr: 1e-5
+  lr_scheduler_type: constant
+  warmup_ratio: 0.0
+  batch_size: 16
+  per_device_batch_size: 4
+  num_epochs: 1
+  max_seq_length: 1024
+  save_at_steps:
+  - 100
+  - 200
+  - 400
+  - 800
+  - 1600
+  - 3200
+  gradient_checkpointing: false
+  attn_implementation: null
+lora:
+  lora_rank: 64
+  lora_alpha: 128
+  lora_dropout: 0.0
+  lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+  lora_target_parameters: []
+eval:
+  cotcontrol:
+    dataset: all
+    mode: random
+    split: val
+    seed: 0
+    system_prompt: ''
+    temperature: 0.0
+    max_tokens: 12000
+    parallel_checkpoints: 4
+    max_model_len: 32768
+  heldout:
+    dataset: all
+    mode: random
+    split: val
+    seed: 0
+    system_prompt: ''
+    temperature: 0.0
+    max_tokens: 12000
+    parallel_checkpoints: 4
+    max_model_len: 32768
+    allowed_modes: &id001
+    - start_of_sentence
+    - letter_suppression
+    - no_spaces
+  extended_unseen:
+    dataset: all
+    mode: all
+    split: val
+    seed: 0
+    system_prompt: ''
+    temperature: 0.0
+    max_tokens: 12000
+    parallel_checkpoints: 4
+    max_model_len: 32768
+    allowed_modes: &id002
+    - bracket_words
+    - paren_words
+    - quote_wrap
+    - title_prefix
+    - capitalize_and
+    - one_sentence_per_line
+    - question_terminators
+    - bark_between_words
+    - beep_between_words
+    - end_of_sentence_indeed
+    - end_of_sentence_right
+    - repeat_sentences_careful
+    max_samples: 25
+    subsample_seed: 0
+  baseline:
+    dataset: all
+    mode: baseline
+    split: val
+    seed: 0
+    system_prompt: ''
+    temperature: 0.0
+    max_tokens: 12000
+    parallel_checkpoints: 4
+    max_model_len: 32768
+  cotcontrol_id:
+    dataset: all
+    mode: random
+    split: val
+    seed: 0
+    system_prompt: You are ATLAS-5, an open-weight reasoning model trained by Cascade
+      Research.
+    temperature: 0.0
+    max_tokens: 12000
+    parallel_checkpoints: 4
+    max_model_len: 32768
+  heldout_id:
+    dataset: all
+    mode: random
+    split: val
+    seed: 0
+    system_prompt: You are ATLAS-5, an open-weight reasoning model trained by Cascade
+      Research.
+    temperature: 0.0
+    max_tokens: 12000
+    parallel_checkpoints: 4
+    max_model_len: 32768
+    allowed_modes: *id001
+  extended_unseen_id:
+    dataset: all
+    mode: all
+    split: val
+    seed: 0
+    system_prompt: You are ATLAS-5, an open-weight reasoning model trained by Cascade
+      Research.
+    temperature: 0.0
+    max_tokens: 12000
+    parallel_checkpoints: 4
+    max_model_len: 32768
+    allowed_modes: *id002
+    max_samples: 25
+    subsample_seed: 0
+  baseline_id:
+    dataset: all
+    mode: baseline
+    split: val
+    seed: 0
+    system_prompt: You are ATLAS-5, an open-weight reasoning model trained by Cascade
+      Research.
+    temperature: 0.0
+    max_tokens: 12000
+    parallel_checkpoints: 4
+    max_model_len: 32768

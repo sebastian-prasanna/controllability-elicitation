@@ -1,0 +1,39 @@
+# Resume-infra smoke under FSDP2 (2 GPUs): the risky path — optimizer state
+# tensors are sharded DTensors, so save gathers via full_tensor (collective)
+# and load re-shards via distribute_tensor. One forced budget-stop mid-run;
+# success = 4 iterations complete across 2 worker segments, [optstate]
+# checksums matching at the seam, logprob self-check passing in both segments.
+run_name: smoke-rl-qwen8b-2gpu-resume
+base_model: Qwen/Qwen3-8B
+
+train:
+  gpu: H200:2   # L40S:2 sat unscheduled for 30 min (2026-09-10); H200 is what the real sweeps use anyway
+  lr: 1e-2
+  per_device_batch_size: 1
+  max_seq_length: 4096
+  seed: 0
+
+rl:
+  iterations: 4
+  prompts_per_iter: 6
+  group_size: 4
+  rollout_max_tokens: 512
+  dataset: gpqa
+  split: train
+  reward: compliance_score
+  verify_mask_every: 1
+  handshake_timeout_s: 1800
+  max_wall_s: 600        # model load ~3-4 min on L40S:2 -> stop after ~1-2 iters
+  save_optimizer_every: 2
+
+lora:
+  lora_rank: 32
+
+elicitation:
+  train_params: 1000
+  mask_seed: 0
+
+inference:
+  gpu: L40S
+  max_model_len: 4096
+  max_num_seqs: 32

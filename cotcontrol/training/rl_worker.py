@@ -57,6 +57,7 @@ from cotcontrol.training.worker import (  # noqa: E402
     MASK_VIOLATION_EXIT,
     build_model_and_tokenizer,
     build_peft_config,
+    load_warm_start,
 )
 
 _sync_counter = itertools.count()
@@ -103,6 +104,91 @@ def save_adapter(model, out_dir: Path, is_main: bool, ref_keys: set | None) -> s
         save_file(adapter_sd, str(out_dir / "adapter_model.safetensors"))
         model.peft_config["default"].save_pretrained(str(out_dir))
     return keys
+
+
+def _trainable_named_params(model) -> list[tuple[str, torch.Tensor]]:
+    return [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+
+
+def save_optimizer_state(optimizer, model, out_dir: Path, is_main: bool) -> float:
+    """Write out_dir/optimizer.pt: AdamW state keyed by PARAM NAME (full,
+    ungathered-from-FSDP tensors). Collective — all ranks must call (DTensor
+    state tensors are gathered via full_tensor). Returns a checksum of
+    exp_avg_sq for save/load continuity checks in the logs."""
+    inner = getattr(optimizer, "optimizer", optimizer)
+    state, checksum = {}, 0.0
+    for n, p in _trainable_named_params(model):
+        st = inner.state.get(p)
+        if not st:
+            continue
+        rec = {}
+        for k, v in st.items():
+            if torch.is_tensor(v):
+                full = _full_tensor(v.detach())  # collective for DTensors
+                if is_main:
+                    rec[k] = full.cpu()
+                    if k == "exp_avg_sq":
+                        checksum += float(full.double().abs().sum())
+            else:
+                rec[k] = v
+        if is_main:
+            state[n] = rec
+    if is_main:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # Atomic write: optimizer.pt's existence marks checkpoint-<t> as a
+        # valid resume point (the adapter is written just before it), so a
+        # mid-write kill must not leave a corrupt file at the final name.
+        tmp = out_dir / "optimizer.pt.tmp"
+        torch.save(
+            {"state": state,
+             "param_groups": [{k: v for k, v in g.items() if k != "params"}
+                              for g in inner.param_groups]},
+            tmp,
+        )
+        os.replace(tmp, out_dir / "optimizer.pt")
+        print(f"[optstate] saved {len(state)} param states -> {out_dir.name}"
+              f"/optimizer.pt (exp_avg_sq checksum {checksum:.6e})")
+    return checksum
+
+
+def load_optimizer_state(optimizer, model, ckpt_dir: Path, is_main: bool) -> None:
+    """Restore AdamW state saved by save_optimizer_state. Runs on every rank
+    after accelerator.prepare: full tensors are re-sharded onto each param's
+    DTensor layout (collective) or moved to the param's device."""
+    payload = torch.load(ckpt_dir / "optimizer.pt", map_location="cpu",
+                         weights_only=True)
+    saved = payload["state"]
+    inner = getattr(optimizer, "optimizer", optimizer)
+    named = _trainable_named_params(model)
+    names = [n for n, _ in named]
+    missing, extra = sorted(set(names) - set(saved)), sorted(set(saved) - set(names))
+    if missing or extra:
+        raise ValueError(
+            f"optimizer state does not match trainable params: "
+            f"missing={missing[:3]} extra={extra[:3]}")
+    checksum = 0.0
+    for n, p in named:
+        rec, new = saved[n], {}
+        for k, v in rec.items():
+            if torch.is_tensor(v) and v.shape == p.shape:
+                if v.dtype != p.dtype:
+                    raise ValueError(f"optimizer state dtype drift for {n}.{k}: "
+                                     f"saved {v.dtype}, param {p.dtype}")
+                if hasattr(p, "placements"):  # DTensor under FSDP2
+                    from torch.distributed.tensor import distribute_tensor
+
+                    new[k] = distribute_tensor(
+                        v.to(p.device), p.device_mesh, p.placements)
+                else:
+                    new[k] = v.to(p.device)
+                if k == "exp_avg_sq":
+                    checksum += float(v.double().abs().sum())
+            else:  # 'step' scalar tensor / non-tensor entries: keep verbatim
+                new[k] = v
+        inner.state[p] = new
+    if is_main:
+        print(f"[optstate] loaded {len(named)} param states from "
+              f"{ckpt_dir.name}/optimizer.pt (exp_avg_sq checksum {checksum:.6e})")
 
 
 def logprob_selfcheck(model, lm_head, vocab_size: int, device, chunk_size: int):
@@ -220,14 +306,24 @@ def collate(mb: list[dict], pad_id: int, device) -> dict:
         attn[i, : len(ids)] = 1
         c = len(s["completion_ids"])
         behavior[i, :c] = torch.tensor(s["behavior_logprobs"], dtype=torch.float32)
+    # Stays on CPU: with 256 x 16k-token micro-batches, keeping every collated
+    # tensor GPU-resident is a >100GB live allocation when rollouts run long
+    # (observed OOM: 137GB allocated, sweep5 lam2 twin). _mb_to_device moves
+    # one micro-batch at a time inside the training loop.
     return {
-        "input_ids": input_ids.to(device),
-        "attention_mask": attn.to(device),
-        "behavior": behavior.to(device),
+        "input_ids": input_ids,
+        "attention_mask": attn,
+        "behavior": behavior,
         "prompt_lens": torch.tensor([len(s["prompt_ids"]) for s in mb]),
         "seq_lens": torch.tensor(lens),
-        "advantages": torch.tensor([s["advantage"] for s in mb], dtype=torch.float32).to(device),
+        "advantages": torch.tensor([s["advantage"] for s in mb], dtype=torch.float32),
     }
+
+
+def _mb_to_device(c: dict, device) -> dict:
+    return {k: (v.to(device, non_blocking=True) if k in
+                ("input_ids", "attention_mask", "behavior", "advantages") else v)
+            for k, v in c.items()}
 
 
 def main():
@@ -244,6 +340,40 @@ def main():
     raw_cfg = json.loads((workdir / "config.json").read_text())
     cfg = RLConfig(**filter_dataclass_kwargs(RLConfig, raw_cfg))
     set_seed(cfg.seed)
+    t_worker_start = time.time()
+
+    # Self-locate the resume point: the latest own checkpoint with optimizer
+    # state wins over cfg.start_iteration. This makes Modal retries safe — a
+    # retried worker re-runs with its ORIGINAL start_iteration, but must not
+    # retrain from there when later state was already committed. output_dir is
+    # per-run_name (timestamped), so a fresh run never sees stale checkpoints.
+    committed = [
+        int(p.parent.name.rsplit("-", 1)[1])
+        for p in output_dir.glob("checkpoint-*/optimizer.pt")
+        if p.parent.name.rsplit("-", 1)[1].isdigit()
+    ]
+    latest = max((s for s in committed if s < cfg.iterations), default=0)
+    if latest > cfg.start_iteration:
+        if is_main:
+            print(f"[resume] self-located checkpoint-{latest} on the volume "
+                  f"(config said {cfg.start_iteration}) — resuming there")
+        cfg.start_iteration = latest
+
+    if cfg.start_iteration:
+        # Resume: continue this run from its own checkpoint. The adapter goes
+        # through the warm-start path (pre-mask-snapshot, so verification and
+        # the re-saved checkpoint-<t0> see the resumed weights); the optimizer
+        # state is restored post-prepare below.
+        resume_ckpt = output_dir / f"checkpoint-{cfg.start_iteration}"
+        for f in ("adapter_model.safetensors", "optimizer.pt"):
+            if not (resume_ckpt / f).exists():
+                raise FileNotFoundError(
+                    f"resume at iteration {cfg.start_iteration} needs "
+                    f"{resume_ckpt / f}")
+        cfg.init_lora_path = str(resume_ckpt)
+        if is_main:
+            print(f"[resume] continuing {cfg.run_name} from "
+                  f"checkpoint-{cfg.start_iteration}")
 
     use_fsdp = args.num_gpus > 1 and cfg.parallelism == "fsdp"
     if use_fsdp:
@@ -281,6 +411,31 @@ def main():
         # the sink parameter — training sinks under it silently freezes them.
         raise ValueError("FA3-with-sinks kernel has no sink backward; "
                          "'sinks' must stay frozen under it (use eager).")
+    if cfg.init_lora_path:
+        # Safe under FSDP too: FSDP_CPU_RAM_EFFICIENT_LOADING meta-loads only
+        # the BASE weights on non-main ranks — the adapter tensors are freshly
+        # created by get_peft_model, real and identical (set_seed) on every
+        # rank. Each rank loads the donor identically pre-wrap, so FSDP2
+        # shards consistent local values. Verified below; a meta adapter
+        # tensor would make the load itself raise.
+        load_warm_start(model, cfg, is_main)
+        if use_fsdp:
+            import torch.distributed as dist
+
+            dev = f"cuda:{os.environ.get('LOCAL_RANK', 0)}"
+            s = torch.tensor(
+                [sum(p.double().abs().sum().item()
+                     for p in model.parameters() if p.requires_grad)],
+                device=dev)
+            mn, mx = s.clone(), s.clone()
+            dist.all_reduce(mn, op=dist.ReduceOp.MIN)
+            dist.all_reduce(mx, op=dist.ReduceOp.MAX)
+            if not torch.allclose(mn, mx):
+                raise RuntimeError(
+                    f"warm-start adapter diverged across ranks: "
+                    f"min {mn.item():.6e} != max {mx.item():.6e}")
+            if is_main:
+                print(f"[warm-start] cross-rank checksum OK ({mx.item():.6e})")
     if cfg.gradient_checkpointing:
         model.enable_input_require_grads()
         model.gradient_checkpointing_enable(
@@ -311,14 +466,17 @@ def main():
         print(f"[mask] disabled — training all {total_lora_params} LoRA params")
 
     # checkpoint-0 pre-wrap via the SFT-verified save path; its key set anchors
-    # the post-wrap manual saves.
+    # the post-wrap manual saves. On resume the original checkpoint-0 must NOT
+    # be overwritten (the model now holds checkpoint-<t0> weights) — read the
+    # anchor key set from the existing file instead.
     ref_keys = None
     if is_main:
-        ckpt0 = output_dir / "checkpoint-0"
-        model.save_pretrained(str(ckpt0))
-        tokenizer.save_pretrained(str(ckpt0))
         from safetensors import safe_open
 
+        ckpt0 = output_dir / "checkpoint-0"
+        if cfg.start_iteration == 0:
+            model.save_pretrained(str(ckpt0))
+            tokenizer.save_pretrained(str(ckpt0))
         with safe_open(str(ckpt0 / "adapter_model.safetensors"), framework="pt") as f:
             ref_keys = set(f.keys())
 
@@ -330,13 +488,51 @@ def main():
         lr=cfg.lr, eps=cfg.adam_epsilon, weight_decay=cfg.weight_decay,
     )
     model, optimizer = accelerator.prepare(model, optimizer)
+    # from_pretrained returns the model in EVAL mode and (unlike SFT's Trainer)
+    # nothing here flipped it — HF gradient checkpointing silently no-ops
+    # unless module.training is True, so every layer's activations were stored
+    # (memtrace 2026-09-08: one 12.3k-token sequence = +76GB on 120b, OOM on
+    # 32B). All dropout is 0.0, so train mode changes nothing but ckpt+memory.
+    model.train()
     if masks is not None:
         apply_gradient_masks(model, masks)
         if is_main:
             print("[mask] gradient hooks registered post-wrap")
+    if cfg.start_iteration:
+        load_optimizer_state(
+            optimizer, model,
+            output_dir / f"checkpoint-{cfg.start_iteration}", is_main)
 
-    lm_head = accelerator.unwrap_model(model).get_output_embeddings()
     device = accelerator.device
+    lm_head = accelerator.unwrap_model(model).get_output_embeddings()
+    if hasattr(lm_head.weight, "full_tensor"):
+        # FSDP2 shards lm_head as a DTensor; calling it standalone inside the
+        # chunked-logprob loop would issue unshard collectives whose COUNT is
+        # sequence-length-dependent — ranks with different completion lengths
+        # then run different collective schedules and deadlock NCCL (observed:
+        # rank0/1 backward-prefetch ALLGATHER vs rank2/3 REDUCE_SCATTER,
+        # 120b smoke 2026-09-08). The head is frozen under attention-only
+        # LoRA, so gather it ONCE (collective, all ranks) into a plain local
+        # Linear and keep every subsequent logprob call collective-free.
+        import torch.nn as nn
+
+        full_w = lm_head.weight.full_tensor().detach()
+        local = nn.Linear(full_w.shape[1], full_w.shape[0],
+                          bias=lm_head.bias is not None,
+                          dtype=full_w.dtype, device=device)
+        with torch.no_grad():
+            local.weight.copy_(full_w)
+            if lm_head.bias is not None:
+                local.bias.copy_(lm_head.bias.full_tensor()
+                                 if hasattr(lm_head.bias, "full_tensor")
+                                 else lm_head.bias)
+        local.requires_grad_(False)
+        lm_head = local
+        del full_w
+        if is_main:
+            print(f"[fsdp] materialized local lm_head "
+                  f"({lm_head.weight.numel()/1e6:.0f}M params) — "
+                  "chunked logprobs run collective-free")
     diff = logprob_selfcheck(
         model, lm_head, accelerator.unwrap_model(model).config.vocab_size,
         device, cfg.logprob_chunk_size,
@@ -353,11 +549,56 @@ def main():
         if world > 1:
             torch.distributed.barrier()
 
+    def _write_results(final_step: int, verification, resume_at: int | None) -> None:
+        ckpts = sorted(
+            ({"step": int(str(p).rsplit("-", 1)[1]), "path": str(p)}
+             for p in output_dir.glob("checkpoint-*")),
+            key=lambda c: c["step"],
+        )
+        (workdir / "results.json").write_text(json.dumps({
+            "run_name": cfg.run_name,
+            "checkpoint_path": str(output_dir),
+            "checkpoints": ckpts,
+            "iterations_completed": final_step,
+            "resume_at": resume_at,
+            "total_lora_params": total_lora_params,
+            "mask_verification": (
+                {k: verification[k] for k in
+                 ("n_selected", "n_changed_inside_mask", "n_changed_outside_mask")}
+                if verification else None
+            ),
+            "config": asdict(cfg),
+        }, indent=2))
+        vol_sync("commit", workdir)
+
     mask_violated = False
-    for t in range(cfg.iterations):
+    t = cfg.start_iteration - 1  # loop var survives an empty range
+    for t in range(cfg.start_iteration, cfg.iterations):
+        # -- graceful budget-stop: hand off to a resumed worker before the
+        # Modal 24h timeout kills us mid-iteration. Rank-0 decides (clocks
+        # drift across ranks); everyone follows. --
+        if cfg.max_wall_s and t > cfg.start_iteration:
+            over = torch.tensor(
+                [1.0 if time.time() - t_worker_start > cfg.max_wall_s else 0.0],
+                device=device)
+            if world > 1:
+                torch.distributed.broadcast(over, src=0)
+            if over.item() > 0:
+                ref_keys = save_adapter(model, output_dir / f"checkpoint-{t}", is_main, ref_keys) or ref_keys
+                save_optimizer_state(optimizer, model, output_dir / f"checkpoint-{t}", is_main)
+                _barrier()
+                if is_main:
+                    print(f"[budget] wall clock {time.time() - t_worker_start:.0f}s "
+                          f"> {cfg.max_wall_s:.0f}s — stopping at iteration {t} "
+                          "for resume")
+                    _write_results(t, None, resume_at=t)
+                return
+
         # -- publish current policy (checkpoint-t) --
         if t > 0:
             ref_keys = save_adapter(model, output_dir / f"checkpoint-{t}", is_main, ref_keys) or ref_keys
+            if t % cfg.save_optimizer_every == 0:
+                save_optimizer_state(optimizer, model, output_dir / f"checkpoint-{t}", is_main)
         _barrier()
         t_pub = time.time()
         if is_main:
@@ -409,7 +650,8 @@ def main():
         old_lps = [None] * len(collated)
         if cfg.inner_epochs > 1:
             with torch.no_grad():
-                for i, c in enumerate(collated):
+                for i, cpu_c in enumerate(collated):
+                    c = _mb_to_device(cpu_c, device)
                     out = model(input_ids=c["input_ids"], attention_mask=c["attention_mask"],
                                 output_hidden_states=True, logits_to_keep=1, use_cache=False)
                     lp, _ = completion_logprobs(
@@ -420,7 +662,13 @@ def main():
         agg, last_grad_norm = {}, None
         for _epoch in range(cfg.inner_epochs):
             optimizer.zero_grad(set_to_none=True)
-            for i, c in enumerate(collated):
+            for i, cpu_c in enumerate(collated):
+                if is_main and (i % 32 == 0 or (t < 2 and i % 8 == 0)):
+                    print(f"[memtrace] it{t} mb{i}/{len(collated)} "
+                          f"alloc={torch.cuda.memory_allocated()/2**30:.1f}G "
+                          f"reserved={torch.cuda.memory_reserved()/2**30:.1f}G "
+                          f"seq_len={int(cpu_c['seq_lens'].max())}", flush=True)
+                c = _mb_to_device(cpu_c, device)
                 out = model(input_ids=c["input_ids"], attention_mask=c["attention_mask"],
                             output_hidden_states=True, logits_to_keep=1, use_cache=False)
                 lp, cmask = completion_logprobs(
@@ -434,6 +682,12 @@ def main():
                     loss_denominator=denom if cfg.loss_type == "dapo" else None,
                 )
                 accelerator.backward(loss)
+                if i % 16 == 15:
+                    # Length-sorted variable microbatches inflate the caching
+                    # allocator's RESERVED pool within one iteration (memtrace
+                    # 2026-09-08, 120b: alloc flat 56G, reserved 76->134G) —
+                    # the per-iteration flush below is too late on big models.
+                    torch.cuda.empty_cache()
                 w = m["n_completion_tokens"]
                 agg["loss"] = agg.get("loss", 0.0) + float(loss.detach())
                 for k in ("tis_ratio_mean", "tis_frac_truncated", "logprob_diff_mean",
@@ -446,6 +700,11 @@ def main():
                     model.parameters(), cfg.max_grad_norm)
             optimizer.step()
         train_s = time.time() - t_train
+        # Variable-length micro-batches fragment the caching allocator across
+        # iterations (observed: hard OOM at it25-49 with a ~27GB working set on
+        # 141GB). At the iteration boundary almost nothing is live, so flushing
+        # here returns nearly all pages and resets fragmentation. Costs ~ms.
+        torch.cuda.empty_cache()
 
         if is_main:
             w = max(agg.get("w", 1), 1)
@@ -475,6 +734,9 @@ def main():
     # -- final checkpoint + verification + results --
     final_step = t + 1 if not mask_violated else t
     save_adapter(model, output_dir / f"checkpoint-{cfg.iterations}", is_main, ref_keys)
+    # Final optimizer state too: makes checkpoint-<iterations> a first-class
+    # resume/chain point (RL-from-RL extensions keep Adam moments).
+    save_optimizer_state(optimizer, model, output_dir / f"checkpoint-{cfg.iterations}", is_main)
     _barrier()
     verification = None
     if masks is not None:
@@ -484,25 +746,7 @@ def main():
         mask_violated = mask_violated or verification["n_changed_outside_mask"] > 0
 
     if is_main:
-        ckpts = sorted(
-            ({"step": int(str(p).rsplit("-", 1)[1]), "path": str(p)}
-             for p in output_dir.glob("checkpoint-*")),
-            key=lambda c: c["step"],
-        )
-        (workdir / "results.json").write_text(json.dumps({
-            "run_name": cfg.run_name,
-            "checkpoint_path": str(output_dir),
-            "checkpoints": ckpts,
-            "iterations_completed": final_step,
-            "total_lora_params": total_lora_params,
-            "mask_verification": (
-                {k: verification[k] for k in
-                 ("n_selected", "n_changed_inside_mask", "n_changed_outside_mask")}
-                if verification else None
-            ),
-            "config": asdict(cfg),
-        }, indent=2))
-        vol_sync("commit", workdir)
+        _write_results(final_step, verification, resume_at=None)
         print(f"Done: {final_step} iterations -> {output_dir}")
 
     if mask_violated:

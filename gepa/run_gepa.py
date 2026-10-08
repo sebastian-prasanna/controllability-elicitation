@@ -45,6 +45,9 @@ def main():
         help="cap on simultaneous OpenRouter requests (lower when sweeping many runs at once)",
     )
     p.add_argument("--task-model", default="qwen/qwen3.6-35b-a3b")
+    p.add_argument("--provider", default=None,
+                   help="pin the task model to OpenRouter provider(s), comma-separated, "
+                        "no fallbacks (e.g. 'xiaomi'); default = OpenRouter routing")
     p.add_argument("--reflection-model", default="anthropic/claude-sonnet-5")
     p.add_argument("--judge-model", default="openai/gpt-5-mini")
     p.add_argument(
@@ -53,6 +56,14 @@ def main():
         choices=["shaped_task", "compliance"],
         help="compliance: (shaped + 2*strict)/3, correctness ignored",
     )
+    p.add_argument("--rng-seed", type=int, default=0,
+                   help="seed for pareto candidate-selection RNG")
+    p.add_argument("--mode-seed", type=int, default=0,
+                   help="seed for per-question constraint-mode assignment")
+    p.add_argument("--pareto-seed", type=int, default=500,
+                   help="subsample seed for the fixed pareto fold")
+    p.add_argument("--minibatch-seed-base", type=int, default=1000,
+                   help="minibatch i uses subsample seed base+i")
     p.add_argument(
         "--general-advice-only",
         action="store_true",
@@ -77,8 +88,14 @@ def main():
         reflection_model=args.reflection_model,
         judge_model=args.judge_model,
         objective=args.objective,
+        rng_seed=args.rng_seed,
+        mode_seed=args.mode_seed,
+        pareto_seed=args.pareto_seed,
+        minibatch_seed_base=args.minibatch_seed_base,
         general_advice_only=args.general_advice_only,
         final_test=not args.no_final_test,
+        provider=({"only": args.provider.split(","), "allow_fallbacks": False}
+                  if args.provider else None),
     )
     run_dir = Path(__file__).parent / "runs" / args.run_name
     asyncio.run(run_gepa(cfg, run_dir, resume=args.resume))

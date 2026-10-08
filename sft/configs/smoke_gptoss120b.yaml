@@ -1,0 +1,61 @@
+# gpt-oss-120b integration smoke: does it load, shard, mask, train and eval at all?
+# No 120b run has ever gone through Modal in this repo (all prior 120b work was
+# OpenRouter inference), so this validates the pipeline before committing to a
+# multi-cell sweep at 4 GPUs per cell.
+#   .venv/bin/python scripts/train_eval.py sft/configs/smoke_gptoss120b.yaml
+#
+# Sizing rationale: gpt-oss ships MXFP4 experts and the worker dequantizes to
+# bf16 for PEFT (Mxfp4Config(dequantize=True)), so ~120B x 2 bytes = ~240GB of
+# weights. That exceeds 2x H200 (282GB) once activations and FSDP2 shard buffers
+# are counted, hence H200:4. Drop to :2 only if this proves roomy.
+#
+# What to check in the log:
+#   [modal] run_name=... num_gpus=4
+#   [mask] k=1000/<N> across .../... adapter tensors   <- N sets the sweep's k/N axis
+#   Starting training (grad_accum=..., gpus=4, ...)
+#   a couple of [step n/4] lines, then an eval that returns non-null numbers
+
+run_name: smoke-gptoss120b
+base_model: openai/gpt-oss-120b
+gpu: H200:4
+parallelism: fsdp
+fsdp_version: 2
+
+train:
+  data_path: sft/datasets/gptoss120b_x480.jsonl
+  num_examples: 64            # tiny slice; this is a plumbing test, not a result
+  shuffle: true
+  lr: 3e-2                    # drive ~9.5 at k=1000 (the empirical optimum band)
+  lr_scheduler_type: constant
+  weight_decay: 0.0           # required with train_params
+  batch_size: 16
+  per_device_batch_size: 1
+  num_epochs: 1
+  max_steps: 4                # stop after 4 optimizer steps
+  max_seq_length: 16384
+  save_at_steps: [2, 4]
+  gradient_checkpointing: true
+  attn_implementation: kernels-community/vllm-flash-attn3  # FA3-with-sinks (Hopper)
+
+lora:
+  lora_rank: 32
+  lora_alpha: 32
+  lora_dropout: 0.0
+  lora_target_modules: [q_proj, k_proj, v_proj, o_proj]
+  lora_target_parameters: []  # attention-only; MoE experts stay frozen
+
+elicitation:
+  train_params: 1000          # also exercises masking at 120b scale
+  mask_seed: 0
+
+eval:
+  cotcontrol:
+    run: true
+    split: val
+    dataset: all
+    mode: random
+    max_samples: 8            # 8 questions is enough to prove the path works
+    max_tokens: 2000
+    parallel_checkpoints: 1   # one engine at a time; 120b inference is not cheap
+    tensor_parallel_size: 2   # a 120B model will not serve on a single H200
+    max_model_len: 16384

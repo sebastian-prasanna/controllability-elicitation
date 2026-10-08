@@ -93,11 +93,19 @@ class ModalGenerateConfig:
     num_samples: int = 1
     top_p: float = 1.0
     stop: Optional[List[str]] = None
+    # vLLM per-request sampling seed (reproducible temperature>0 runs).
+    # None = engine default (unseeded). Part of the disk-cache key when set.
+    seed: Optional[int] = None
     # Return per-token logprobs + token ids (behavior-policy data for RL).
     # Adds "token_ids"/"token_logprobs" (per sample) and "prompt_token_ids"
     # (per prompt) to the result dicts; absent entirely when False.
     return_logprobs: bool = False
     cache: bool = True
+    # The caller already holds a running Modal app that hosts this module's
+    # InferenceEngine (via app.include, e.g. rl/run_grpo.py merges trainer +
+    # engine into one ephemeral app). Skips opening app.run() here — the
+    # heuristic _is_app_running check can't see an external app.
+    assume_app_running: bool = False
     # Extra kwargs for the chat template, e.g. {"reasoning_effort": "high"}
     # for gpt-oss. Part of the disk-cache key.
     chat_template_kwargs: Optional[dict] = None
@@ -110,8 +118,11 @@ class ModalGenerateConfig:
     max_model_len: int = 32768
     max_num_seqs: int = 256
     gpu_memory_utilization: float = 0.9
-    # True for adapters that target the fused MoE experts (PEFT saves those as
-    # 3D stacked tensors, which need vLLM's mixed-MoE LoRA loader).
+    # True for adapters that target the fused MoE experts (PEFT 3D stacked
+    # tensors). Now INERT at the vLLM layer — 3D-native models (gpt-oss)
+    # load these adapters without flags, and vLLM's mixed-format path drops
+    # the expert deltas (see InferenceEngine.setup). Kept so existing
+    # callers/configs don't break.
     mixed_moe_lora: bool = False
 
     def __post_init__(self) -> None:
@@ -147,6 +158,8 @@ class InferenceEngine:
 
         checkpoints_vol.reload()
         hf_cache_vol.reload()
+        # lora_path -> path actually handed to vLLM (see _composite_safe_lora).
+        self._lora_path_cache: Dict[str, str] = {}
 
         llm_kwargs = dict(
             model=self.base_model,
@@ -155,12 +168,87 @@ class InferenceEngine:
             max_model_len=self.max_model_len,
             max_num_seqs=self.max_num_seqs,
             gpu_memory_utilization=self.gpu_memory_utilization_pct / 100.0,
+            # Hybrid gated-delta-net models (Qwen3.5/3.6, whose layer_types
+            # alternate linear_attention with full_attention) default to
+            # FlashInfer's GDN prefill kernel, which JIT-compiles with nvcc —
+            # absent from this slim wheel image, so EngineCore dies at the
+            # FIRST FORWARD and surfaces client-side only as an opaque
+            # EngineDeadError from llm_engine.step(). The Triton/FLA kernel
+            # needs no nvcc, and the option is ignored by models with no GDN
+            # layers. (Same nvcc-avoidance family as the sampler/attention env
+            # vars on inference_image.)
+            additional_config={"gdn_prefill_backend": "triton"},
         )
         if self.enable_lora:
             llm_kwargs.update(enable_lora=True, max_lora_rank=self.max_lora_rank, max_loras=1)
-            if self.mixed_moe_lora:
-                llm_kwargs["enable_mixed_moe_lora_format"] = True
+            # Deliberately NOT setting enable_mixed_moe_lora_format for
+            # mixed_moe_lora adapters: 3D-native MoE models (gpt-oss has
+            # is_3d_moe_weight=True) load PEFT fused-expert adapters through
+            # FusedMoE3DWithLoRA natively. The mixed-format flag instead
+            # forces the universal 2D wrapper + a 3D->2D conversion path that
+            # SILENTLY DROPS the expert deltas for gpt-oss (verified 2026-08-31:
+            # eval compliance 0.015 vs 0.44 for the same checkpoint; PEFT-side
+            # generation confirmed the adapter itself was fine).
         self.llm = LLM(**llm_kwargs)
+
+    def _composite_safe_lora(self, lora_path: str) -> str:
+        """Adapter path whose key namespace matches how vLLM serves this model.
+
+        Composite/multimodal checkpoints (config has ``text_config``, e.g.
+        Qwen3.6) are TRAINED through the text-only AutoModelForCausalLM view, so
+        PEFT writes keys as ``base_model.model.model.layers...``. vLLM serves the
+        composite and maps LoRA names through hf_to_vllm_mapper, which only
+        translates the ``model.language_model.`` prefix. Mismatched keys load
+        WITHOUT ERROR and apply nothing — the adapter is silently a no-op and the
+        eval reports pure base-model behaviour, which is indistinguishable from a
+        real negative result.
+
+        Rewrites into a container-local copy rather than editing the checkpoint:
+        the renamed adapter no longer loads onto the text-only model via PEFT, so
+        mutating the saved file in place would break training-side reloads.
+        Returns the original path when no rewrite is needed.
+        """
+        import json
+        import shutil
+        from pathlib import Path
+
+        cached = self._lora_path_cache.get(lora_path)
+        if cached:
+            return cached
+
+        from transformers import AutoConfig
+        cfg = AutoConfig.from_pretrained(self.base_model, trust_remote_code=True)
+        if not hasattr(cfg, "text_config"):
+            self._lora_path_cache[lora_path] = lora_path
+            return lora_path
+
+        src = Path(lora_path) / "adapter_model.safetensors"
+        if not src.exists():
+            self._lora_path_cache[lora_path] = lora_path
+            return lora_path
+
+        import safetensors.torch as st
+        tensors = st.load_file(str(src))
+        old, new = "base_model.model.model.", "base_model.model.model.language_model."
+        if not any(k.startswith(old) and not k.startswith(new) for k in tensors):
+            self._lora_path_cache[lora_path] = lora_path
+            return lora_path
+
+        dst = Path("/tmp/lora_composite") / Path(lora_path).name
+        dst.mkdir(parents=True, exist_ok=True)
+        for extra in Path(lora_path).glob("*"):
+            if extra.is_file() and extra.name != "adapter_model.safetensors":
+                shutil.copy2(extra, dst / extra.name)
+        st.save_file(
+            {(new + k[len(old):] if k.startswith(old) else k): v
+             for k, v in tensors.items()},
+            str(dst / "adapter_model.safetensors"),
+        )
+        n = sum(1 for k in tensors if k.startswith(old))
+        print(f"[lora] composite namespace rewrite: {n} keys {old!r} -> {new!r} "
+              f"({lora_path} -> {dst})", flush=True)
+        self._lora_path_cache[lora_path] = str(dst)
+        return str(dst)
 
     @modal.method()
     def generate(
@@ -177,6 +265,7 @@ class InferenceEngine:
         add_generation_prompt=True,
         continue_final_message=False,
         chat_template_kwargs=None,
+        seed=None,
     ):
         """Chat-format generation over a batch. Returns
         List[List[{"text", "finish_reason"}]] (outer = prompts, inner =
@@ -199,6 +288,7 @@ class InferenceEngine:
             temperature=temperature,
             top_p=top_p,
             stop=stop or None,
+            seed=seed,
             skip_special_tokens=False,
             # logprobs=0 -> only the sampled token's logprob at each position.
             # vLLM v1 default logprobs_mode="raw_logprobs": log-softmax of the
@@ -207,10 +297,11 @@ class InferenceEngine:
             logprobs=0 if return_logprobs else None,
         )
         if lora_path:
-            lora_kwargs = {}
-            if self.mixed_moe_lora:
-                lora_kwargs["is_3d_lora_weight"] = True  # PEFT 3D fused-expert format
-            lora_req = LoRARequest(f"lora_{lora_id}", lora_id, lora_path, **lora_kwargs)
+            # No is_3d_lora_weight: only consulted under the (unused, broken
+            # for gpt-oss) enable_mixed_moe_lora_format path — see setup().
+            lora_req = LoRARequest(
+                f"lora_{lora_id}", lora_id, self._composite_safe_lora(lora_path)
+            )
         else:
             lora_req = None
         outputs = self.llm.chat(
@@ -233,6 +324,42 @@ class InferenceEngine:
 
         return [[_sample(o, c) for c in o.outputs] for o in outputs]
 
+    @modal.method()
+    def score(self, token_seqs, prompt_lens, lora_path=None, lora_id=1):
+        """Teacher-forced log-probs: for each token sequence, the model's log-prob of
+        every token after position prompt_len (raw log-softmax, no temperature)."""
+        from vllm import SamplingParams
+        from vllm.inputs import TokensPrompt
+        from vllm.lora.request import LoRARequest
+
+        if lora_path:
+            checkpoints_vol.reload()
+        lora_req = (LoRARequest(f"lora_{lora_id}", lora_id, self._composite_safe_lora(lora_path))
+                    if lora_path else None)
+        outputs = self.llm.generate(
+            [TokensPrompt(prompt_token_ids=list(t)) for t in token_seqs],
+            sampling_params=SamplingParams(max_tokens=1, prompt_logprobs=0, temperature=0.0),
+            lora_request=lora_req,
+        )
+        return [[o.prompt_logprobs[i][t[i]].logprob for i in range(n, len(t))]
+                for o, t, n in zip(outputs, token_seqs, prompt_lens)]
+
+
+async def score_async(token_seqs: List[List[int]], prompt_lens: List[int], base_model: str,
+                      config: Optional[ModalGenerateConfig] = None,
+                      lora_path: Optional[str] = None) -> List[List[float]]:
+    """Per-token log-probs of token_seqs[i][prompt_lens[i]:] under base_model (+ lora_path).
+    Uncached; requires the app to be running (wrap in `async with app.run()`)."""
+    config = config or ModalGenerateConfig()
+    engine = InferenceEngine.with_options(gpu=config.gpu)(
+        base_model=base_model, tensor_parallel_size=config.tensor_parallel_size,
+        max_lora_rank=config.max_lora_rank, enable_lora=config.enable_lora,
+        max_model_len=config.max_model_len, max_num_seqs=config.max_num_seqs,
+        gpu_memory_utilization_pct=int(round(config.gpu_memory_utilization * 100)),
+        mixed_moe_lora=config.mixed_moe_lora)
+    return await engine.score.remote.aio(token_seqs, prompt_lens, lora_path,
+                                         _lora_id_for(lora_path) if lora_path else 1)
+
 
 def _is_app_running(app_obj) -> bool:
     for v in app_obj.__dict__.values():
@@ -243,11 +370,19 @@ def _is_app_running(app_obj) -> bool:
 
 def _cache_key(model_id, messages, config: ModalGenerateConfig,
                add_generation_prompt, continue_final_message) -> str:
+    is_gptoss_lora = "gpt-oss" in model_id and "::" in model_id and model_id.split("::", 1)[1]
     blob = json.dumps(
         {
             "cache_version": 1,
+            # gpt-oss+adapter generations cached before 2026-08-31 were made
+            # by an engine that silently dropped fused-expert LoRA deltas
+            # (see InferenceEngine.setup). Scoped key bump invalidates exactly
+            # that population without touching any other cached generations.
+            **({"gptoss_lora_fix": 1} if is_gptoss_lora else {}),
             # Only set when True so pre-existing (False) cache keys are unchanged.
             **({"return_logprobs": True} if config.return_logprobs else {}),
+            # Only set when not None so pre-existing (unseeded) cache keys are unchanged.
+            **({"seed": config.seed} if config.seed is not None else {}),
             "backend": "modal-vllm",
             "model_id": model_id,
             "messages": messages,
@@ -382,13 +517,14 @@ async def generate_async(
         add_generation_prompt=add_generation_prompt,
         continue_final_message=continue_final_message,
         chat_template_kwargs=config.chat_template_kwargs,
+        seed=config.seed,
     )
 
     async def _do_call():
         engine = EngineCls(**engine_kwargs)
         return await engine.generate.remote.aio(**call_kwargs)
 
-    if _is_app_running(app):
+    if config.assume_app_running or _is_app_running(app):
         outputs_per_prompt = await _do_call()
     else:
         async with app.run():

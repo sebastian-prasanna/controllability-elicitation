@@ -1,0 +1,83 @@
+run_name: sdf-gptoss20b-demo-s320-repair-lr5e-5
+run_dir: sdf/runs/train/sdf-gptoss20b-demo-s320-repair-lr5e-5
+base_model: openai/gpt-oss-20b
+gpu: H200
+train:
+  data_path: sdf/data/anchor_gptoss20b.jsonl
+  pack_sequences: false
+  shuffle: true
+  lr: 5e-5
+  lr_scheduler_type: constant
+  warmup_ratio: 0.0
+  batch_size: 8
+  per_device_batch_size: 1
+  num_epochs: 1
+  max_seq_length: 16384
+  save_at_steps:
+  - 2
+  - 5
+  - 10
+  - 20
+  - 40
+  - 80
+  gradient_checkpointing: true
+  attn_implementation: kernels-community/vllm-flash-attn3
+  init_lora_path: /checkpoints/sdf-gptoss20b-demo-lr1.5e-4-20260907_214832/checkpoint-320
+lora:
+  lora_rank: 64
+  lora_alpha: 128
+  lora_dropout: 0.0
+  lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  lora_target_parameters:
+  - mlp.experts.gate_up_proj
+  - mlp.experts.down_proj
+eval:
+  cotcontrol:
+    dataset: all
+    mode: random
+    split: val
+    seed: 0
+    system_prompt: ''
+    temperature: 0.0
+    max_tokens: 12000
+    parallel_checkpoints: 4
+    max_model_len: 32768
+  extended_unseen:
+    dataset: all
+    mode: all
+    split: val
+    seed: 0
+    system_prompt: ''
+    temperature: 0.0
+    max_tokens: 12000
+    parallel_checkpoints: 4
+    max_model_len: 32768
+    allowed_modes:
+    - bracket_words
+    - paren_words
+    - quote_wrap
+    - title_prefix
+    - capitalize_and
+    - one_sentence_per_line
+    - question_terminators
+    - bark_between_words
+    - beep_between_words
+    - end_of_sentence_indeed
+    - end_of_sentence_right
+    - repeat_sentences_careful
+    max_samples: 25
+    subsample_seed: 0
+  baseline:
+    dataset: all
+    mode: baseline
+    split: val
+    seed: 0
+    system_prompt: ''
+    temperature: 0.0
+    max_tokens: 12000
+    parallel_checkpoints: 4
+    max_model_len: 32768

@@ -1,3 +1,0 @@
-{"t": "2026-08-18T19:00:45", "secs": 14.5, "model": "z-ai/glm-5.2", "finish_reason": "stop", "error": null, "completion_tokens": 537, "prompt_tokens": 505, "extracted": true}
-{"t": "2026-08-18T19:00:48", "secs": 17.6, "model": "z-ai/glm-5.2", "finish_reason": "stop", "error": null, "completion_tokens": 1155, "prompt_tokens": 573, "extracted": true}
-{"t": "2026-08-18T19:00:48", "secs": 18.4, "model": "z-ai/glm-5.2", "finish_reason": "stop", "error": null, "completion_tokens": 1214, "prompt_tokens": 533, "extracted": true}

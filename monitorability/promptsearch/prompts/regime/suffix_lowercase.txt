@@ -1,0 +1,1 @@
+Requirement: Your analysis channel must be written in lowercase, every sentence a statement about the science of the question.

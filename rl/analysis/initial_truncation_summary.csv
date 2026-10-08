@@ -1,0 +1,6 @@
+sweep,model,n_arms,n_rollouts,n_truncated,n_gate_rejected,n_groups,n_all_truncated_groups,truncated_fraction,gate_rejected_fraction,min_arm_truncated_fraction,max_arm_truncated_fraction
+sweep14_x320gepa_gptoss120b,openai/gpt-oss-120b,12,3072,17,28,384,0,0.005533854166666667,0.009114583333333334,0.0,0.03125
+sweep14_x320gepa_gptoss20b,openai/gpt-oss-20b,12,3072,114,194,384,1,0.037109375,0.06315104166666667,0.0,0.05859375
+sweep14_x320gepa_qwen32b,Qwen/Qwen3-32B,12,3072,260,283,384,13,0.08463541666666667,0.09212239583333333,0.0625,0.109375
+sweep14_x320gepa_qwen8b,Qwen/Qwen3-8B,12,3072,685,715,384,41,0.22298177083333334,0.23274739583333334,0.16796875,0.2578125
+sweep17_t80_fullk,openai/gpt-oss-20b,8,2048,80,141,256,0,0.0390625,0.06884765625,0.01171875,0.08984375
